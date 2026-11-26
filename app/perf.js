@@ -50,7 +50,10 @@ export async function init(ctx) {
   }
 
   // 归一化一块几何：只留 position/normal/color（matTerrain 只要这三样），
-  // 缺 normal 就算，缺 color 就补白；全部转非索引，保证 mergeGeometries 能拼。
+  // 缺 normal 就算，缺 color 就补白；全部转非索引、全部转 Float32Array，
+  // 否则 mergeGeometries 会因各瓦片属性数组类型不一致而报 console.error
+  // （GLB 的 COLOR_0 有的瓦片是 Float32、有的瓦片是 normalized Uint8，
+  // 类型不一 merge 就失败；2026-11-26 诊断 2 报了 2 条正是这个）。
   function normalize(geo) {
     let g = geo;
     for (const name of Object.keys(g.attributes)) {
@@ -63,6 +66,28 @@ export async function init(ctx) {
       g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
     }
     if (g.index) g = g.toNonIndexed();
+    for (const name of ['position', 'normal', 'color']) {
+      const a = g.attributes[name];
+      if (!a) continue;
+      // color 有的瓦片是 VEC4（带 alpha）、有的是 VEC3：统一砍成 3 分量，
+      // 否则 mergeGeometries 报 itemSize 不一致（诊断 3 的 2 条正是这个）。
+      if (name === 'color' && a.itemSize === 4) {
+        const src = a.array;
+        const out = new Float32Array((src.length / 4) * 3);
+        for (let i = 0, j = 0; i < src.length; i += 4, j += 3) {
+          out[j] = src[i]; out[j + 1] = src[i + 1]; out[j + 2] = src[i + 2];
+        }
+        g.setAttribute(name, new THREE.BufferAttribute(out, 3));
+        continue;
+      }
+      if (!(a.array instanceof Float32Array)) {
+        const src = a.array;
+        const max = a.normalized ? (src instanceof Uint16Array ? 65535 : 255) : 1;
+        const out = new Float32Array(src.length);
+        for (let i = 0; i < src.length; i++) out[i] = src[i] / max;
+        g.setAttribute(name, new THREE.BufferAttribute(out, a.itemSize));
+      }
+    }
     return g;
   }
 
