@@ -1,0 +1,99 @@
+{
+  "1": {
+    "ok": true,
+    "ts": "2026-11-26T06:37:44.582Z",
+    "ms": 68018,
+    "errors": [],
+    "failedReqs": [],
+    "six": {
+      "chunksHigh": 44,
+      "chunksMid": 112,
+      "chunksLoaded": 156,
+      "chunksFailed": 0,
+      "terrainTiles": 32,
+      "farTiles": 96,
+      "fabricLoaded": true,
+      "filesLoaded": 440,
+      "filesFailed": 0
+    }
+  },
+  "2": {
+    "ok": true,
+    "ts": "2026-11-26T06:39:30.177Z",
+    "ms": 88683,
+    "errors": [],
+    "failedReqs": [],
+    "loaded": {
+      "people": 48,
+      "street": {
+        "lamps": 5790,
+        "furniture": {
+          "bench": 65,
+          "bin": 65,
+          "sign": 8,
+          "light": 4
+        },
+        "shops": 18,
+        "trees": {
+          "total": 220,
+          "perStreet": {
+            "S1": {
+              "species": "round",
+              "form": "圆冠",
+              "count": 80
+            },
+            "S2": {
+              "species": "spire",
+              "form": "尖塔",
+              "count": 14
+            },
+            "S3": {
+              "species": "flat",
+              "form": "扁冠",
+              "count": 48
+            },
+            "S4": {
+              "species": "small",
+              "form": "小圆冠",
+              "count": 48
+            },
+            "S5": {
+              "species": "column",
+              "form": "柱形",
+              "count": 30
+            }
+          },
+          "perSpecies": {
+            "round": 80,
+            "spire": 14,
+            "flat": 48,
+            "small": 48,
+            "column": 30
+          }
+        },
+        "lanterns": {
+          "lanterns": 66,
+          "wires": 33
+        }
+      },
+      "car": {
+        "replaced": true,
+        "meshes": 3,
+        "tris": 1132,
+        "foundBy": "scene-scan (body 2x0.65x4.4)"
+      }
+    },
+    "trisCheck": {
+      "verts": 3396,
+      "meshes": 3,
+      "trisShouldBe": 1132,
+      "trisReported": 1132
+    }
+  },
+  "3": {
+    "ok": false,
+    "ts": "2026-11-26T06:46:59.085Z",
+    "ms": 5751,
+    "error": "page.evaluate: Target page, context or browser has been closed"
+  }
+}

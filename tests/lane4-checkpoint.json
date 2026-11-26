@@ -1,0 +1,144 @@
+{
+  "stages": {
+    "1": {
+      "ok": true,
+      "bootMs": 40817,
+      "shots": {
+        "day": true,
+        "night": true,
+        "white": true
+      },
+      "measure": {
+        "ok": true,
+        "groundY": -2.51,
+        "topY": 336.49,
+        "height": 339,
+        "target": 339,
+        "error": 0,
+        "within5m": true
+      },
+      "apiOk": true,
+      "errors": [],
+      "failedReqs": [],
+      "pass": true
+    },
+    "2": {
+      "ok": true,
+      "bootMs": 65127,
+      "preset": "spring",
+      "lat": 30.66,
+      "lon": 104.06,
+      "noonWinterAlt": 33.9,
+      "noonSummerAlt": 73.8,
+      "winterDay": 10,
+      "summerDay": 14,
+      "springDay": 11.9,
+      "dahanDay": 10.3,
+      "on": true,
+      "winter": {
+        "sunrise": 8.03,
+        "sunset": 18.05,
+        "length": 10
+      },
+      "errors": [],
+      "failedReqs": [],
+      "pass": true
+    },
+    "3": {
+      "ok": true,
+      "bootMs": 28558,
+      "rainOn": true,
+      "snowOn": true,
+      "fog": 0.5,
+      "fog0": {
+        "near": 4000,
+        "far": 40000
+      },
+      "fogMid": {
+        "near": 2500,
+        "far": 20725
+      },
+      "restoredFog": {
+        "near": 4000,
+        "far": 40000
+      },
+      "restored": {
+        "rain": false,
+        "snow": false,
+        "fog": 0,
+        "night": 0,
+        "display": "normal",
+        "neon": 0.6
+      },
+      "errors": [],
+      "failedReqs": [],
+      "pass": true
+    },
+    "4": {
+      "ok": true,
+      "bootMs": 31015,
+      "rows": [
+        "day",
+        "night",
+        "rain",
+        "snow",
+        "white"
+      ],
+      "night": {
+        "hour": "22",
+        "night": true
+      },
+      "day": {
+        "hour": "10",
+        "day": true
+      },
+      "neonDay": 0.6,
+      "errors": [],
+      "failedReqs": [],
+      "pass": true
+    },
+    "5": {
+      "ok": true,
+      "bootMs": 37532,
+      "check": {
+        "ok": true,
+        "visible": true,
+        "varied": 1110,
+        "sampled": 1129,
+        "mode": "aerial",
+        "display": "normal"
+      },
+      "zoom": {
+        "opened": true,
+        "sizes": [
+          168,
+          531,
+          520
+        ],
+        "isOpen": true,
+        "follow": true,
+        "labels": 25,
+        "labelsLoaded": true,
+        "homeBtn": true,
+        "expandBtn": true,
+        "tint": true,
+        "tintOpacity": "0.3"
+      },
+      "afterDragFollow": false,
+      "afterRecenterFollow": true,
+      "orbit": {
+        "entered": true,
+        "turnedYaw": -1.15,
+        "restoredYaw": -0.65,
+        "beforeYaw": -0.65
+      },
+      "errors": [],
+      "failedReqs": [],
+      "pass": true
+    }
+  },
+  "summary": {
+    "allPass": true,
+    "at": "2026-11-26T06:55:37.092Z"
+  }
+}

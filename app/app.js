@@ -553,13 +553,10 @@ async function buildSix(index) {
   // 相机 / 雾按六区尺度放大
   camera.far = 90000; camera.updateProjectionMatrix();
   scene.fog = new THREE.Fog(0x9db8d6, 4000, 40000);
-  // 初始视角：天府广场上空俯瞰
+  // 初始视角：星泽广场上空俯瞰
   state.target.set(0, 0, 0);
   state.dist = 6000; state.el = 0.62;
   state.pos.set(0, 1.7, 420);
-  // 六区白模无窗光数据：开始页文案去掉“夜里楼灯亮”
-  const so = document.querySelector('#start-overlay p');
-  if (so) so.innerHTML = so.innerHTML.replace('，夜里楼灯亮', '');
   sixLoader = new SixLoader(scene);
   const view = { tx: 0, tz: 0, camX: 0, camY: 6000, camZ: 0, mode: 'aerial', aerialDist: 6000 };
   await sixLoader.loadInitial(view, (p) => {
@@ -597,6 +594,9 @@ function applyTime(hour) {
   hemi.intensity = lerp(a.hemiI, b.hemiI, t);
   state.night = lerp(a.night, b.night, t);
   moonLight.intensity = state.night * 0.35;
+  // 夜色传播给接线模块（roads 灯光池/路面微光、sun 亮窗 shader；各自幂等）
+  if (window.__roads && window.__roads.setNight) { try { window.__roads.setNight(state.night); } catch (e) { /* 夜色传播失败不阻断时间轴 */ } }
+  if (window.__dSunNight && window.__dSunNight.setNight) { try { window.__dSunNight.setNight(state.night); } catch (e) { /* 同上 */ } }
   const winGlow = state.night;
   for (const m of Object.values(facadeMats)) m.emissiveIntensity = winGlow * 1.7;
   if (lampHeadMat) lampHeadMat.emissiveIntensity = 0.05 + winGlow * 2.4;
@@ -827,19 +827,22 @@ function setDisplay(mode) {
   state.display = mode;
   const heat = mode === 'heat', white = mode === 'white';
   if (sixMode) {
-    sixLoader.setDisplay(mode); // 六区：共享材质切换（分块 + fabric）
+    sixLoader.setDisplay(mode); // 六区：共享材质切换（分块 + fabric）——不许改这行
   } else {
     buildingGroup.visible = !heat;
     heatGroup.visible = heat;
     for (const m of normalMeshes) m.material = white ? clayMat : m.userData.mat;
   }
-  $('#tgl-heat').classList.toggle('active', heat);
-  $('#tgl-heat').setAttribute('aria-pressed', String(heat));
+  // 接线模块的显示切换（roofs 经 sixLoader 包装链式调用，不在这里重复调；
+  // skin 停了（STOP 守卫），window.__skin 不存在，不传播）
+  for (const k of ['__roads', '__dSun', '__people', '__playercar', '__dWeather', '__dMaps', '__towerFix', '__street', '__perf']) {
+    const m = window[k];
+    if (m && typeof m.setDisplay === 'function') { try { m.setDisplay(mode); } catch (e) { console.warn('[sandbox] setDisplay failed:', k, e); } }
+  }
   $('#tgl-white').classList.toggle('active', white);
   $('#tgl-white').setAttribute('aria-pressed', String(white));
   toast(heat ? '热力图：按楼高着色（蓝矮 · 红高）' : white ? '白膜模式' : '已恢复正常材质');
 }
-$('#tgl-heat').addEventListener('click', () => setDisplay(state.display === 'heat' ? 'normal' : 'heat'));
 $('#tgl-white').addEventListener('click', () => setDisplay(state.display === 'white' ? 'normal' : 'white'));
 
 // ---------- 泛光（默认关；开时走 EffectComposer）----------
@@ -860,40 +863,10 @@ $('#tgl-bloom').addEventListener('click', () => {
   toast(state.bloom ? '泛光已开（夜景更亮）' : '泛光已关');
 });
 
-// ---------- 导览 ----------
-function stopTour(msg) {
-  if (!state.tour) return;
-  state.tour = false;
-  if (tourTimer) { clearInterval(tourTimer); tourTimer = null; }
-  $('#tgl-tour').classList.remove('active');
-  $('#tgl-tour').setAttribute('aria-pressed', 'false');
-  if (msg) toast(msg);
-}
-$('#tgl-tour').addEventListener('click', () => {
-  if (state.tour) { stopTour('导览已停'); return; }
-  if (!DATA || !DATA.landmarks.length) { toast('暂无地标'); return; }
-  state.tour = true;
-  $('#tgl-tour').classList.add('active');
-  $('#tgl-tour').setAttribute('aria-pressed', 'true');
-  if (state.mode !== 'aerial') setMode('aerial');
-  tourIdx = 0;
-  const go = () => {
-    const lm = DATA.landmarks[tourIdx % DATA.landmarks.length];
-    toast(`导览：${lm.name}`);
-    flyTo(lm.x, lm.z, { dist: 380 });
-    tourIdx++;
-  };
-  go();
-  tourTimer = setInterval(go, 7000);
-});
-
-// ---------- 统计 ----------
-$('#tgl-stats').addEventListener('click', () => {
-  const show = !$('#stats').classList.contains('show');
-  $('#stats').classList.toggle('show', show);
-  $('#tgl-stats').classList.toggle('active', show);
-  $('#tgl-stats').setAttribute('aria-pressed', String(show));
-});
+// ---------- 导览已砍（13:47 令）：只留空壳，旧调用点不报错 ----------
+// stopTour 曾是导览开关；导览、热力图、城市数据、地标分区面板已全部拿掉。
+// panBy / 指针 / 飞往等处仍调 stopTour()，空壳接住，不做任何事。
+function stopTour() {}
 
 // ---------- 时间轴 ----------
 $('#time-slider').addEventListener('input', (e) => { stopPlay(); applyTime(parseFloat(e.target.value)); });
@@ -914,17 +887,9 @@ $('#view-toggle').addEventListener('click', () => {
 });
 $('#drive-exit').addEventListener('click', () => setMode('aerial'));
 
-// ---------- 左侧面板 ----------
-$('#panel-close').addEventListener('click', () => {
-  $('#panel').classList.add('hidden');
-  $('#panel-toggle').classList.add('show');
-});
-$('#panel-toggle').addEventListener('click', () => {
-  $('#panel').classList.remove('hidden');
-  $('#panel-toggle').classList.remove('show');
-});
-
 // ---------- 图表 / 列表 / 小地图 ----------
+// （城市数据面板、地标/分区列表已拿掉：drawCharts / buildLists / drawChartsSix / buildListsSix
+//  不再被 init 调用，留着备用，不删函数体。）
 function drawCharts(data) {
   const counts = {};
   for (const b of data.buildings) counts[b.zone] = (counts[b.zone] || 0) + 1;
@@ -1045,7 +1010,7 @@ function buildListsSix(six) {
   for (const lm of six.landmarks) {
     const b = document.createElement('button');
     b.className = 'item';
-    // 高度只标核实过的两座（339电视塔 339m、交子大道双子塔 218m），其余不写假数
+    // 高度只标核实过的两座（揽星塔 339m、双星塔 218m），其余不写假数
     b.innerHTML = `<span>${lm.name}</span><span>${lm.height_m ? lm.height_m + ' m' : '地标'}</span>`;
     b.addEventListener('click', () => { stopTour(); flyTo(lm.x, lm.z, { dist: 380 }); toast(`飞往 ${lm.name}`); });
     lmBox.appendChild(b);
@@ -1259,6 +1224,45 @@ async function loadData() {
   }
   return FALLBACK;
 }
+// ---------- 超过方案模块接线（总协调 2026-11-26 15:33 接线令） ----------
+// 每个模块单独 try/catch：一个模块坏了只记失败，不阻断启动和其他模块。
+// 顺序：塔 → 屋顶 → 路 → 街面/人 → 玩家车 → 太阳 → 天气 → 设置 → 地图。
+// settings 依赖 __dWeather/__dSun（懒取），须在 weather/sun 之后 init。
+// 不碰 sixLoader.setDisplay 共享材质切换逻辑（roofs 经包装链式调用）。
+const WIRING = [
+  ['tower-fix', './tower-fix.js'],
+  ['roofs', './roofs.js'],
+  ['roads', './roads.js'],
+  ['street', './street.js'],
+  ['people', './people.js'],
+  ['playercar', './playercar.js'],
+  ['sun', './sun.js'],
+  ['weather', './weather.js'],
+  ['settings', './settings.js'],
+  ['maps', './maps.js'],
+  ['perf', './perf.js'],
+  ['skin', './skin.js'],
+];
+async function wireSurpassModules() {
+  const res = { ok: [], stopped: [], failed: [] };
+  for (const [name, url] of WIRING) {
+    try {
+      const m = await import(url);
+      if (typeof m.init !== 'function') throw new Error('no init export');
+      const r = await m.init(window.__sandbox);
+      // skin.js 这类带 STOP 守卫的模块：init 返回 { ok:false, stopped }，不挂东西——记 stopped，不算失败
+      if (r && r.stopped) { res.stopped.push({ name, stopped: r.stopped }); console.log('[wiring] stopped:', name, r.stopped); }
+      else { res.ok.push(name); console.log('[wiring] ok:', name); }
+    } catch (e) {
+      res.failed.push({ name, error: String((e && e.message) || e) });
+      console.error('[wiring] FAILED:', name, e);
+    }
+  }
+  window.__wiring = res;
+  console.log('[wiring] done:', JSON.stringify(res));
+  return res;
+}
+
 async function init() {
   try {
     // 六区白模优先；six-index.json 不存在或损坏才走 city.json 程序化小城
@@ -1277,9 +1281,9 @@ async function init() {
         buildings: [], roads: [], blocks: [], water: [], parks: [],
         landmarks: six.landmarks, districts: six.districts, terrain: { peaks: null },
       };
-      drawChartsSix(six);
-      buildListsSix(six);
+      // 城市数据面板、地标/分区列表已拿掉（13:47 令），不再画图表、不再建列表。
       drawMinimap();
+      await wireSurpassModules();
       $('#stat-buildings').textContent = six.counts.buildings.toLocaleString();
       $('#stat-trees').textContent = six.counts.trees.toLocaleString();
       $('#mock-badge').style.display = 'none';
@@ -1296,8 +1300,6 @@ async function init() {
     }
     DATA = normalizeData(await loadData());
     const counts = buildCity(DATA);
-    drawCharts(DATA);
-    buildLists(DATA);
     drawMinimap();
     $('#stat-buildings').textContent = DATA.buildings.length;
     $('#stat-trees').textContent = counts.treeCount;
@@ -1325,7 +1327,7 @@ async function init() {
 $('#enter-btn').addEventListener('click', () => {
   $('#start-overlay').style.display = 'none';
   window.__sandboxStarted = true;
-  toast('星泽市沙盘 · 拖动平移，点右侧地标飞过去');
+  toast('星泽市沙盘 · 拖动平移，点小地图飞过去');
 });
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;

@@ -149,6 +149,21 @@ export class SixLoader {
   }
 
   async loadCatalog() {
+    // 站级重试（线上 15:02 根因：GitHub Pages 部署 310MB 包后 CDN 边缘短暂不一致，
+    // fabric.glb 15:10 左右 404、一分钟后变 200——文件没缺，是边缘没同步完。
+    // _fetchJSON 每址已重试 3 次；若整站目录仍失败，不能直接报初始化失败：
+    // 间隔 2s 整站再跑一次 loadCatalog，还失败才抛给 init。fabric 失败本来就容忍，不动。）
+    try {
+      await this._loadCatalogOnce();
+    } catch (e) {
+      console.error('[six] loadCatalog failed, retrying whole catalog in 2s', e);
+      await new Promise((r) => setTimeout(r, 2000));
+      await this._loadCatalogOnce();
+    }
+  }
+
+  async _loadCatalogOnce() {
+    this._catalogAttempts = (this._catalogAttempts || 0) + 1;
     // 三个目录并行取（以前串行等三趟）；远山 index 269KB 是首屏外的目录，不阻塞 fabric/分块
     const [mani, ti, fi] = await Promise.all([
       this._fetchJSON(`${PKG}/chunks/index/manifest.json`),

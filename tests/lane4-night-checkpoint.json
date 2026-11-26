@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "pass": true,
+  "day": {
+    "night": 0,
+    "stateNight": 0,
+    "hemi": 0.9
+  },
+  "night": {
+    "night": 1,
+    "stateNight": 1,
+    "hemi": 0.5,
+    "patched": 5,
+    "lamps": 5790,
+    "glowOpacity": 0.9,
+    "headsOpacity": 1,
+    "failedLive": 0,
+    "chunksLoaded": 156
+  },
+  "aerial": {
+    "w": 1280,
+    "h": 800,
+    "meanLum": 84,
+    "blackFrac": 0,
+    "warmFrac": 0.0041,
+    "coolFrac": 0.2622
+  },
+  "street": {
+    "w": 1280,
+    "h": 800,
+    "meanLum": 93.4,
+    "blackFrac": 0,
+    "warmFrac": 0.0041,
+    "coolFrac": 0.3459
+  },
+  "shots": {
+    "aerial": true,
+    "street": true
+  },
+  "errors": [],
+  "failedReqs": []
+}

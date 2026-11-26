@@ -1,0 +1,9 @@
+{
+ "status": "fail",
+ "core": "R2",
+ "bootMs": 20153,
+ "stats": null,
+ "loadFailed": null,
+ "note": "启动 20153ms，__sandboxStats 未见；加载失败 ?（已加载 ?，目标 0）",
+ "at": "2026-11-26T07:59:48.006Z"
+}

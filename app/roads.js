@@ -7,7 +7,7 @@
 // + bridges-v1.json / bridge-shapes.json（桥位与特型桥参数）+ DEM（地面高）。
 // 坐标与包里一致：x=(lon-104.065)*95726，z=(lat-30.665)*110540（用包里的约数，
 // 不用精确值 95753.45，否则几何与分块 GLB 对不上）。
-// 路名全部是虚构名（星泽市），双向分隔路成对共用一名；不许真成都路名。
+// 路名全部是虚构名（星泽市），双向分隔路成对共用一名；不许用真实路名。
 // 只写本文件；不碰 app.js / index.html / six-loader.js / style.css / 六区包。
 // 接线（由总协调统一加，见报告）：app.js 末尾 __sandbox 块之后加
 //   import('./roads.js').then((m) => m.init(window.__sandbox));

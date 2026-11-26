@@ -105,12 +105,14 @@ async function shot(page, name, dom = false) {
     try { await page.screenshot({ path: file, timeout: 60000 }); return file; }
     catch (e) { log(`page.screenshot failed for ${name}: ${String(e.message).split('\n')[0]}; fallback to canvas capture`); }
   }
+  // canvas 直读回落：evaluate 只传函数本体（本版 playwright-core 的 evaluate 最多 2 参，
+  // 传第 3 个 options 会报 Too many arguments——2026-11-26 整轮 loadthrough 段实测撞上，已修）。
   const dataUrl = await page.evaluate(() => {
     const sb = window.__sandbox;
     if (sb.composer) sb.composer.render();
     else sb.renderer.render(sb.scene, sb.camera);
     return sb.renderer.domElement.toDataURL('image/png');
-  }, undefined, { timeout: 120000 });
+  });
   fs.writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
   return file;
 }

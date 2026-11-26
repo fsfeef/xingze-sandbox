@@ -30,32 +30,11 @@
 </div>
 
 <div id="toggles">
-  <button class="tgl" id="tgl-heat" aria-pressed="false">热力图</button>
-  <button class="tgl" id="tgl-tour" aria-pressed="false">导览</button>
   <button class="tgl" id="tgl-white" aria-pressed="false">白膜</button>
   <button class="tgl" id="tgl-bloom" aria-pressed="false">泛光</button>
-  <button class="tgl" id="tgl-stats" aria-pressed="false">统计</button>
 </div>
 
 <div id="help" class="glass">拖动：平移画面 · 滚轮 / 捏合：航拍缩放，步行/飞行只变视野 · WASD / 摇杆移动 · 镜头绝不自动转</div>
-
-<button id="panel-toggle" aria-label="展开数据面板">📊</button>
-<aside id="panel" class="glass">
-  <h2>城市数据 <button id="panel-close" aria-label="收起面板">✕</button></h2>
-  <div class="sub">各区建筑数</div>
-  <canvas id="chart-bar" width="440" height="260"></canvas>
-  <div class="sub">用地占比</div>
-  <canvas id="chart-donut" width="440" height="260"></canvas>
-  <div class="legend" id="panel-legend"></div>
-</aside>
-
-<aside id="list" class="glass">
-  <h2>地标 / 分区</h2>
-  <h3>地标</h3>
-  <div id="list-landmarks"></div>
-  <h3>分区</h3>
-  <div id="list-zones"></div>
-</aside>
 
 <div id="minimap-wrap" class="glass">
   <canvas id="minimap" width="336" height="336"></canvas>
@@ -76,7 +55,7 @@
   <button id="drive-exit">下车</button>
 </div>
 
-<div id="stats" class="glass">
+<div id="stats" class="glass show">
   <div><b id="stat-fps">-- FPS</b></div>
   <div>draw call <span id="stat-calls">--</span> · 三角面 <span id="stat-tris">--</span></div>
   <div>建筑 <span id="stat-buildings">--</span> 栋 · 树 <span id="stat-trees">--</span> 棵</div>
@@ -95,12 +74,12 @@
 <div id="start-overlay" class="overlay" style="display:none">
   <div class="card">
     <h1>星泽市</h1>
-    <div class="sub">虚拟城市沙盘 · 主城区（绕城以内）</div>
+    <div class="sub">虚拟城市沙盘 · 主城区</div>
     <p>
       <b>拖动</b>　平移画面，画面跟手走<br>
       <b>滚轮 / 捏合</b>　航拍缩放；走路 / 飞行时只变视野，不拉相机<br>
       <b>WASD / 摇杆</b>　走路、飞行；开车 W 油门 S 刹车 A/D 转向<br>
-      <b>右侧列表 / 小地图</b>　点一下飞过去，落点准确<br>
+      <b>小地图</b>　点一下飞过去，落点准确<br>
       <b>底部时间轴</b>　0–24h，白天 / 黄昏 / 夜晚，夜里楼灯亮<br>
       <b>镜头绝不自己转</b>　没有自动环绕
     </p>

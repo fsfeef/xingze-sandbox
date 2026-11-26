@@ -1,0 +1,41 @@
+{
+  "url": "http://localhost:8000/app/",
+  "settle": 5000,
+  "errors": [],
+  "failedRequests": [],
+  "checks": {
+    "roads.init": {
+      "ok": true,
+      "detail": "{\"arterials\":178,\"arterialKm\":312.2,\"junctions\":10,\"dashes\":22397,\"sidewalkKm\":144.2,\"signs\":10,\"bridges\":7,\"cars\":10,\"recolorTris\":370,\"recolorSegs\":382,\"recolorMeshes\":4,\"recolorSkippedLines\":0}"
+    },
+    "playercar.init": {
+      "ok": true,
+      "detail": "{\"replaced\":true,\"meshes\":3,\"tris\":3396,\"foundBy\":\"scene-scan (body 2x0.65x4.4)\"}"
+    },
+    "recolor.ran": {
+      "ok": true,
+      "detail": "meshes=298 tris=9412 segs=6711"
+    }
+  },
+  "shots": [],
+  "stats": {
+    "arterials": 178,
+    "arterialKm": 312.2,
+    "junctions": 10,
+    "dashes": 22397,
+    "sidewalkKm": 144.2,
+    "signs": 10,
+    "bridges": 7,
+    "cars": 10,
+    "recolorTris": 370,
+    "recolorSegs": 382,
+    "recolorMeshes": 4,
+    "recolorSkippedLines": 0
+  },
+  "recolor": {
+    "meshes": 298,
+    "tris": 9412,
+    "segs": 6711,
+    "queued": 0
+  }
+}

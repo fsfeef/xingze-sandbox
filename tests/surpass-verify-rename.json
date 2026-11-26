@@ -1,0 +1,27 @@
+{
+ "status": "fail",
+ "core": "R1",
+ "renameHits": 11,
+ "renameHitLines": [
+  "app/tower-fix.js:1:// 339电视塔修复（E 路 · surpass §3.4②）",
+  "app/roofs.js:54:  '人民公园': '望星公园', '春熙路': '星熙路', '武侯祠': '凌霄祠', '锦城湖': '云锦湖',",
+  "app/roofs.js:55:  '杜甫草堂': '听涛草堂', '宽窄巷子': '青石双巷', '文殊院': '云林禅院', '熊猫基地': '云竹熊猫苑',",
+  "app/roofs.js:56:  '永陵': '青石陵', '成都东站': '星泽东站', '青羊宫': '紫气宫', '安顺桥': '霓虹桥',",
+  "app/roofs.js:57:  '东郊记忆': '铁光记忆园', '天府广场': '星泽广场', '环球中心': '星环中心',",
+  "app/roofs.js:58:  '天府艺术公园': '星泽艺术公园', '太古里': '星光里', '339电视塔': '揽星塔',",
+  "app/roofs.js:59:  '府河': '星河', '琴台路': '琴韵路', '九眼桥': '九虹桥', '望江楼': '望星楼',",
+  "app/roofs.js:60:  '锦江': '星江', '交子大道双子塔': '双星塔', '锦里': '灯影里',",
+  "data/six-index.json:205:  \"麓湖\",",
+  "data/six-index.json:206:  \"兴隆湖\",",
+  "data/six-index.json:207:  \"东安湖\""
+ ],
+ "tier2Lines": 13,
+ "tier2Note": "只计数，不判 FAIL（范围用语，等总协调定夺）",
+ "sixNamesOk": true,
+ "sixNamesError": null,
+ "colorAnchorsMissing": [],
+ "colorAnchorsTotal": 17,
+ "denyHits": [],
+ "note": "Tier-1 11 行；six-names 25+6 OK；配色锚点缺 0/17；禁词违规 0 处",
+ "at": "2026-11-26T07:56:51.686Z"
+}

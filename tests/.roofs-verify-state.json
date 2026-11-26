@@ -1,0 +1,303 @@
+{
+ "boot": {
+  "ok": true,
+  "bootMs": 18082,
+  "at": "2026-11-26T07:57:55.806Z",
+  "errors": [],
+  "failedReqs": [],
+  "overlay": {
+   "start": {
+    "display": "flex",
+    "visible": false
+   },
+   "error": {
+    "display": "",
+    "visible": false
+   },
+   "errorText": "未知错误",
+   "enterBtn": {
+    "visible": true,
+    "disabled": false
+   }
+  },
+  "stream": {
+   "chunksHigh": 44,
+   "chunksMid": 112,
+   "chunksLoaded": 156,
+   "chunksFailed": 0,
+   "terrainTiles": 32,
+   "farTiles": 96,
+   "fabricLoaded": true,
+   "filesLoaded": 285,
+   "filesFailed": 0,
+   "failedLive": 0,
+   "failedChunks": [],
+   "failedTiles": [],
+   "failedShards": []
+  },
+  "hasSandbox": true
+ },
+ "_errors": [],
+ "_failedReqs": [],
+ "roofs": {
+  "ok": true,
+  "at": "2026-11-26T08:00:35.917Z",
+  "snapshot": {
+   "chunks": 118,
+   "clusters": 12945,
+   "forms": 10790,
+   "edges": 56586,
+   "built": 16,
+   "skipped": 8,
+   "tower": true,
+   "phase1": 12897,
+   "phase2": 48,
+   "digest": "5e3bda68"
+  },
+  "landmarks": [
+   {
+    "name": "星泽广场",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "望星公园",
+    "built": true,
+    "form": "pavilion",
+    "topY": 75.8,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星熙路",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "凌霄祠",
+    "built": true,
+    "form": "ancient-hall",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "云锦湖",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "听涛草堂",
+    "built": true,
+    "form": "cottage",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "青石双巷",
+    "built": true,
+    "form": "alley",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "云林禅院",
+    "built": true,
+    "form": "temple",
+    "topY": 76.9,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "云竹熊猫苑",
+    "built": true,
+    "form": "panda-modern",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "青石陵",
+    "built": true,
+    "form": "tomb",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星泽东站",
+    "built": true,
+    "form": "station",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "紫气宫",
+    "built": true,
+    "form": "taoist",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "霓虹桥",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "铁光记忆园",
+    "built": true,
+    "form": "industrial",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星环中心",
+    "built": true,
+    "form": "supertall",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星泽艺术公园",
+    "built": true,
+    "form": "museum",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星光里",
+    "built": true,
+    "form": "lowtile",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "揽星塔",
+    "built": false,
+    "form": "tower-registered-only",
+    "topY": 339,
+    "heightVerified": 339,
+    "skipped": false,
+    "registered": true
+   },
+   {
+    "name": "星河",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "琴韵路",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "九虹桥",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "望星楼",
+    "built": true,
+    "form": "double-eave",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "星江",
+    "built": false,
+    "form": "not-lane1",
+    "topY": 0,
+    "heightVerified": null,
+    "skipped": true,
+    "registered": false
+   },
+   {
+    "name": "双星塔",
+    "built": true,
+    "form": "twin",
+    "topY": 15,
+    "heightVerified": 218,
+    "skipped": false,
+    "registered": false
+   },
+   {
+    "name": "灯影里",
+    "built": true,
+    "form": "arcade",
+    "topY": 15,
+    "heightVerified": null,
+    "skipped": false,
+    "registered": false
+   }
+  ]
+ },
+ "shots": {
+  "ok": true,
+  "at": "2026-11-26T07:43:32.803Z",
+  "landmark": "clicked:武侯祠地标",
+  "files": [
+   "surpass-roofs-01-day-aerial.png",
+   "surpass-roofs-02-landmark-close.png",
+   "surpass-roofs-03-landmark-zoomed.png",
+   "surpass-roofs-04-night.png"
+  ],
+  "roofsFinal": {
+   "chunks": 274,
+   "clusters": 27875,
+   "forms": 23218,
+   "edges": 119721,
+   "built": 16
+  }
+ }
+}
