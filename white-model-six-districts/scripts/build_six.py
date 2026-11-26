@@ -10,7 +10,9 @@ v3 相对 v2 的改动（2026-11-25 总攻）：
   lon 102.8-105.0 / lat 30.0-31.6，row0=北）；旧 4 瓦片 data/dem/chengdu-dem-90m.npy
   已实测证实错误（西南平原读 2000m、青城山读 646m、九顶山读 417m），停用。
   DATUM 524 -> 506（新 DEM 天府广场 506.1 -> 约 0）。兴隆湖湖面 DEM 单元压到 464m。
-- 水：batch1 water-v1（线 4,089 + 面 1,892）+ 8 大湖已拼 multipolygon（lakes-assembled-v1）；
+- 水：batch1 water-v1（线 4,089 + 面 1,891）+ 11 条湖记录（9 个湖名）已拼 multipolygon（lakes-assembled-v1）；
+  六区内 5 条记录（北湖/锦城湖/白鹭湾×2/升仙湖），其余 6 条在区外（裁剪所致，非缺失；
+  其中青龙湖 rel 10660802 几何落在 lon 105.56，源文件损坏待重拼）；
   水面/用地按分块裁剪入块（clip），不只按质心入块。
 - 用地：landuse-v1 15,164 面（park/green/residential/commercial/industrial/parking/square）
   按类别画地面色块（简化到 ≤64 点，<200m² 跳过，洞忽略）。
@@ -57,6 +59,10 @@ _sys.path.insert(0, "/home/hatch/.local/lib/python3.12/site-packages")
 from shapely.geometry import Polygon as _ShpPolygon, MultiPolygon as _ShpMulti, Point as _ShpPoint
 from shapely.ops import unary_union as _unary_union
 from shapely.prepared import prep as _prep
+try:
+    from shapely import constrained_delaunay_triangles as _cdt
+except Exception:
+    _cdt = None  # fallback: holed roofs degrade to exterior-ring top (warn at use)
 _DISTRICTS = {}
 for _name, _rings in json.load(open("/home/hatch/workspace/virtual-city/district-polygons.json")).items():
     _ps = []
@@ -99,6 +105,20 @@ def _tile_hits_6(tx, tz):
     _r = _ShpPolygon([(tx*2000.0, tz*2000.0), (tx*2000.0+2000.0, tz*2000.0),
                       (tx*2000.0+2000.0, tz*2000.0+2000.0), (tx*2000.0, tz*2000.0+2000.0)])
     return _UNION.intersects(_r)
+
+# 2026-11-26 补空环：远山内框 inner_rect（x -59400~39600、z -51480~39600，
+# 即 lon 103.445~104.479、lat 30.199~31.023；远山瓦片全部落在其外）。
+# 城区 169 片只覆盖六区，内框与城区矩形之间 1976 片瓦片是空的（龙泉山脊 914m、
+# 青城山都在环内），只有 70x70km 平绿兜底面。补法：与六区瓦片同一套代码、同一份
+# DEM6（6 瓦片 Copernicus，lon 102.8-105.0/lat 30.0-31.6 已覆盖全环，无空值），
+# 按 2000m/90m 同口径生成环内瓦片；不用 GEDTM30（裸地 DTM，与城区 DSM 口径不同，
+# 接缝处会出 3m（平原）~60m（林木陡坡）台阶）。新瓦片共 2131 片（环内 2300 - 已有 169）。
+_INNER_RECT = (-59400.0, -51480.0, 39600.0, 39600.0)
+def _tile_hits_ring(tx, tz):
+    """2000m 地形瓦片是否与远山内框相交（补空环用）。"""
+    _x0, _z0, _x1, _z1 = _INNER_RECT
+    return not (tx*2000.0+2000.0 <= _x0 or tx*2000.0 >= _x1 or
+                tz*2000.0+2000.0 <= _z0 or tz*2000.0 >= _z1)
 print(f"six-district filter: union area {_UNION.area/1e6:.1f} km2, districts {sorted(_DISTRICTS)}", flush=True)
 
 def lonlat_to_m(lon, lat):
@@ -147,7 +167,8 @@ CHUNK_KEYS = ["b", "roads", "rivers", "water", "water_islands", "metro_line", "m
               "entrances", "entrances_est", "station_hall", "station_platform", "landmarks", "bridges", "footbridges", "compounds", "railway",
               "elev", "piers", "toll_booths", "toll_plazas", "landuse", "natrail",
               "natrail_stations", "lamps", "lamps_bridge", "lamps_tunnel", "flowers", "trees", "greenway", "runway", "aprons",
-              "special_lines", "special_tris", "road_ribbons", "vpiers", "mt_pois"]
+              "special_lines", "special_tris", "road_ribbons", "vpiers", "mt_pois",
+              "tunnels", "tunnel_portals", "river_rails"]  # 2026-11-26 修底子：隧道段计数/洞口/河岸栏杆
 
 def new_chunk():
     return {k: [] for k in CHUNK_KEYS}
@@ -420,17 +441,18 @@ def _rect_ring(x, z, L, W, heading_deg):
 
 
 def prism(acc, ring, y0, y1, rgb):
-    """素棱柱：墙 + 顶。只用轮廓 + 高度，不加女儿墙/退台等程序造型。"""
-    cx = sum(p[0] for p in ring)/len(ring); cz = sum(p[1] for p in ring)/len(ring)
+    """素棱柱：墙 + 顶。只用轮廓 + 高度，不加女儿墙/退台等程序造型。
+    墙法线按环绕向定（与 _wall_ring 外环同法：s=sign(有向面积)，
+    n=(s*dz, -s*dx)/边长）。质心法对凹环会错边（26932 塔 8 边环 3 条锯齿边
+    法线内翻，6 个墙三角错），故不用；凸环两种算法逐边一致，已验过。"""
+    s = 1.0 if signed_area(ring) >= 0 else -1.0
     n = len(ring)
     for i in range(n):
         x1, z1 = ring[i]; x2, z2 = ring[(i+1) % n]
         dx, dz = x2-x1, z2-z1
         ln = math.hypot(dx, dz)
         if ln < 0.01: continue
-        mx, mz = (x1+x2)/2-cx, (z1+z2)/2-cz
-        ml = math.hypot(mx, mz) or 1.0
-        nx, nz = mx/ml, mz/ml
+        nx, nz = s * dz / ln, -s * dx / ln
         acc.quad([x1, y0, z1], [x2, y0, z2], [x2, y1, z2], [x1, y1, z1], [nx, 0, nz], rgb)
     up = [0, 1, 0]
     for (a, b, c) in ear_clip(ring):
@@ -442,6 +464,73 @@ def flat_poly(acc, ring, y, rgb):
     for (a, b, c) in ear_clip(ring):
         acc.tri([ring[a][0], y, ring[a][1]], [ring[b][0], y, ring[b][1]],
                 [ring[c][0], y, ring[c][1]], up, rgb)
+
+# ---- 2026-11-26 satellite-fix 样板 · 重叠楼综合体 (overlap-complex-v1) ----
+# 只服务建模层 virtual-city/data/overlap-complex-v1.json 的 2 处样板（7 条足迹），
+# 全城其他楼一律走上面的素棱柱。Acc.tri 按给定法线自动纠绕向，故这里只给对法线。
+def _wall_ring(acc, ring, y0, y1, rgb, is_hole=False):
+    """单环竖墙。可见侧：外环朝外（远离多边形内部）、洞环朝洞内（朝向塔）。
+    环绕向任意（OSM 原环可 CW 可 CCW；shapely 外环 CCW、内环 CW）：
+    外环 CCW / 洞环 CW 时可见侧为边方向右手侧，否则为左手侧。
+    质心法对凹环会错边，故不用 prism() 的质心法线。"""
+    s = 1.0 if signed_area(ring) >= 0 else -1.0
+    k = s if not is_hole else -s
+    n = len(ring)
+    for i in range(n):
+        x1, z1 = ring[i]; x2, z2 = ring[(i + 1) % n]
+        dx, dz = x2 - x1, z2 - z1
+        ln = math.hypot(dx, dz)
+        if ln < 0.01: continue
+        nx, nz = k * dz / ln, -k * dx / ln
+        acc.quad([x1, y0, z1], [x2, y0, z2], [x2, y1, z2], [x1, y1, z1],
+                 [nx, 0, nz], rgb)
+
+def _holed_prism(acc, ring, holes, y0, y1, rgb):
+    """带洞棱柱：外环墙（可带塔位缺口）+ 洞壁 + 洞顶（约束 Delaunay，精确贴洞）。
+    holes=[] 时退化为单体棱柱，但顶面仍走 CDT——生成器 ear_clip 会在凹环上
+    卡住（美术馆花瓣环 52 点只剖出 33/50 个三角，顶面缺 2755 m2），故样板楼
+    一律走 CDT 顶。"""
+    _wall_ring(acc, ring, y0, y1, rgb)
+    for hr in holes:
+        _wall_ring(acc, hr, y0, y1, rgb, is_hole=True)
+    poly = _ShpPolygon(ring, holes=[[(x, z) for x, z in h] for h in holes])
+    up = [0, 1, 0]
+    if _cdt is not None:
+        try:
+            tris = _cdt(poly)
+            geoms = list(tris.geoms) if hasattr(tris, "geoms") else [tris]
+            for t in geoms:
+                pts = list(t.exterior.coords)[:3]
+                acc.tri([pts[0][0], y1, pts[0][1]], [pts[1][0], y1, pts[1][1]],
+                        [pts[2][0], y1, pts[2][1]], up, rgb)
+            return
+        except Exception as _e:
+            print(f"WARN holed roof CDT failed ({_e}); falling back to exterior top")
+    for (a, b, c) in ear_clip(ring):
+        acc.tri([ring[a][0], y1, ring[a][1]], [ring[b][0], y1, ring[b][1]],
+                [ring[c][0], y1, ring[c][1]], up, rgb)
+
+def _parapet(acc, ring, y, h=0.5, t=0.3, rgb=None):
+    """女儿墙：沿屋顶外环每边一条薄墙（外立面 + 内立面 + 顶盖），高 0.5m、厚 0.3m。
+    内法线取边方向左手侧（CCW 外环的内侧）；环为 CW 时翻向（按 signed_area 判定）。"""
+    if rgb is None: rgb = [0.91, 0.91, 0.91]
+    s = 1.0 if signed_area(ring) >= 0 else -1.0
+    n = len(ring)
+    for i in range(n):
+        x1, z1 = ring[i]; x2, z2 = ring[(i + 1) % n]
+        dx, dz = x2 - x1, z2 - z1
+        ln = math.hypot(dx, dz)
+        if ln < 0.01: continue
+        ix, iz = -dz / ln * s, dx / ln * s
+        ox, oz = -ix, -iz
+        acc.quad([x1, y, z1], [x2, y, z2], [x2, y + h, z2], [x1, y + h, z1],
+                 [ox, 0, oz], rgb)
+        acc.quad([x1 + ix * t, y, z1 + iz * t], [x2 + ix * t, y, z2 + iz * t],
+                 [x2 + ix * t, y + h, z2 + iz * t], [x1 + ix * t, y + h, z1 + iz * t],
+                 [ix, 0, iz], rgb)
+        acc.quad([x1, y + h, z1], [x2, y + h, z2],
+                 [x2 + ix * t, y + h, z2 + iz * t], [x1 + ix * t, y + h, z1 + iz * t],
+                 [0, 1, 0], rgb)
 
 # ---------------- GLB 写出 ----------------
 def _pack_glb(gltf, bin_data):
@@ -564,6 +653,8 @@ C_ROAD_MAJOR = [0.55, 0.55, 0.55]
 C_ROAD_MINOR = [0.72, 0.72, 0.72]
 C_ROAD_FOOT = [0.82, 0.82, 0.82]
 C_WATER = [0.62, 0.72, 0.78]
+C_RAIL = [0.30, 0.30, 0.33]      # 2026-11-26 修底子：河岸栏杆（顶梁+立柱，1px 线，与路/河线同画法）
+C_PORTAL = [0.60, 0.60, 0.62]    # 2026-11-26 修底子：隧道洞门框（示意尺寸，见 tunnel_portals）
 C_BRIDGE = [0.45, 0.45, 0.52]
 C_FOOTBRIDGE = [0.60, 0.60, 0.66]
 C_ELEV_RAMP = [0.38, 0.38, 0.48]   # 高速匝道/主线高架（§7.14）
@@ -696,7 +787,8 @@ def main():
     _roads_by_id = {r["osm_id"]: r for r in roads_all["roads"]}
     _nodes = build_node_index(roads_all["roads"], bdeck)
     _elev_roads = [r for r in roads_all["roads"]
-                   if r["highway"] in SCOPE or (own_deck(r, bdeck)[0] or 0) > 0]
+                   if (r["highway"] in SCOPE or (own_deck(r, bdeck)[0] or 0) > 0)
+                   and r.get("tunnel") != "yes"]  # 2026-11-26 修底子：隧道在地下，不进高架集（否则会被画成高架桥面）
     # 注意：scope（motorway + 全部 _link）必须全进高架集，不只是 own_deck>0 的——
     # 缺 layer 的匝道自身无 deck，但端点推断可能给它 6.9m 的坡头（另一端接地；
     # 2026-11-25 A8 标准叠加公式，旧 6.25m 已废止）；
@@ -725,7 +817,262 @@ def main():
     # 绝对不许按数组下标把 v2 高度往骨文件（63,160 栋）或其他几何上贴——下标错位
     # （骨 idx 100 = v2 idx 426），圈外 21,405 栋会全错位；如需贴合，一律按轮廓匹配。
     # v2 不可重跑（build_heights_v2.py 断言失败 + /tmp/globfp_bbox.pkl 已删），只用现成文件。
-    buildings = v2["buildings_ctx"]
+    # ---- 2026-11-26 修底子·建筑位置修正层 v1（只改建筑足迹，不动其他要素） ----
+    # 修正层：virtual-city/data/building-corrections-v1.json（clip 沿实测路/水边裁足迹、
+    # delete 重复/全在水里/裁完无剩、add OSM 有而模型缺的 4 栋；共 134 条）。
+    # 匹配按足迹指纹：clean_ring 后坐标 0.1m 舍入排序 md5，与修正层同口径。
+    # 同指纹多栋时 delete 只删 delete_count 栋（9813/9817 同一 OSM way 667581162
+    # 两遍，留一栋）。clip 一栋变多片时按片拆成多条记录（同高）；分片质心所在
+    # 分块由下文 ck() 按新环重算，跨块自动归位。
+    def _corr_fp(_ring):
+        _pts = sorted((round(float(_x), 1), round(float(_z), 1)) for _x, _z in _ring)
+        return hashlib.md5(json.dumps(_pts).encode()).hexdigest()[:16]
+    def _apply_corrections(_buildings):
+        _path = "/home/hatch/workspace/virtual-city/data/building-corrections-v1.json"
+        try:
+            _corr = json.load(open(_path))
+        except Exception as _e:
+            print(f"corrections: no layer ({_e}); buildings as-is")
+            return _buildings
+        _by_fp = {}
+        for _en in _corr.get("entries", []):
+            if _en["type"] in ("clip", "delete"):
+                _by_fp.setdefault(_en["fp"], []).append(_en)
+        _out, _n = [], {"clip": 0, "delete": 0, "add": 0}
+        for _b in _buildings:
+            _fp = _corr_fp(clean_ring(_b["p"]))
+            _hits = _by_fp.get(_fp)
+            if not _hits:
+                _out.append(_b)
+                continue
+            _en = _hits.pop(0)
+            if _en["type"] == "delete":
+                _n["delete"] += 1
+                continue
+            for _pc in _en["pieces"]:
+                _nb = dict(_b)
+                _nb["p"] = [[float(a), float(b)] for a, b in _pc]
+                _out.append(_nb)
+            _n["clip"] += 1
+        for _en in _corr.get("entries", []):
+            if _en["type"] != "add":
+                continue
+            for _pc in _en["pieces"]:
+                _out.append({"p": [[float(a), float(b)] for a, b in _pc],
+                             "h": float(_en["height_m"]), "t": "yes",
+                             "h_orig": float(_en["height_m"]),
+                             "height_source": _en.get("height_source", "corrections-v1"),
+                             "height_confidence": _en.get("height_confidence", "low")})
+            _n["add"] += 1
+        print(f"corrections v1 applied: clip {_n['clip']} buildings, "
+              f"delete {_n['delete']}, add {_n['add']} -> {len(_out)} buildings "
+              f"(was {len(_buildings)})")
+        return _out
+    buildings = _apply_corrections(v2["buildings_ctx"])
+    # ---- 2026-11-26 satellite-fix 样板 · 重叠楼综合体 v1（只动 2 处、7 条足迹） ----
+    # 层文件 virtual-city/data/overlap-complex-v2.json（不存在时回退 v1）；
+    # 匹配按 _corr_fp（与修正层同口径）。任一条对不上（指纹/洞环）即大声失败，
+    # 不静默造旧盒子。
+    def _apply_overlap_complex(_buildings):
+        _v2 = "/home/hatch/workspace/virtual-city/data/overlap-complex-v2.json"
+        _v1 = "/home/hatch/workspace/virtual-city/data/overlap-complex-v1.json"
+        _path = _v2 if os.path.exists(_v2) else _v1
+        try:
+            _layer = json.load(open(_path))
+        except Exception as _e:
+            print(f"overlap-complex: no layer ({_e}); buildings as-is")
+            return _buildings
+        print(f"overlap-complex: layer {_path} version {_layer.get('version')}")
+        _by_fp = {e["fp"]: e for e in _layer.get("entries", [])}
+        if not _by_fp:
+            return _buildings
+        # 逐裙楼地面：每处 podium / split 片用自己的 ground_ref（现算复核，
+        # 差 >0.05m 用现算值并打印）；不再取第一个 podium 当全局地面。
+        def _ground_checked(_ref, _label):
+            _g = ground(float(_ref["x"]), float(_ref["z"]))
+            if abs(_g - float(_ref["ground"])) > 0.05:
+                print(f"overlap-complex: {_label} ground ref mismatch "
+                      f"layer={_ref['ground']} now={_g:.2f}; using now")
+            return _g
+        _ground_by_podium_fp = {}
+        _ground_by_piece = {}
+        for _e in _layer["entries"]:
+            if _e["action"] == "podium":
+                _ground_by_podium_fp[_e["fp"]] = _ground_checked(
+                    _e["ground_ref"], f"podium {_e.get('raw_idx')}")
+            elif _e["action"] == "split_podium":
+                for _pc in _e["pieces"]:
+                    _ground_by_piece[_pc["piece_id"]] = _ground_checked(
+                        _pc["ground_ref"], f"split piece {_pc['piece_id']}")
+        def _tower_ground(_en):
+            _pid = _en.get("ground_ref_piece")
+            if _pid is not None:
+                if _pid not in _ground_by_piece:
+                    raise SystemExit(f"overlap-complex: tower {_en.get('raw_idx')} "
+                                     f"ground_ref_piece {_pid!r} not a split piece; "
+                                     f"refusing to build")
+                return _ground_by_piece[_pid]
+            _pfp = _en.get("ground_ref_fp")
+            if _pfp is not None and _pfp in _ground_by_podium_fp:
+                return _ground_by_podium_fp[_pfp]
+            raise SystemExit(f"overlap-complex: tower {_en.get('raw_idx')} has no "
+                             f"resolvable podium ground (ground_ref_fp={_pfp!r}, "
+                             f"ground_ref_piece={_pid!r}); refusing to build")
+        _out, _n = [], {"merge_keep": 0, "drop": 0, "podium": 0, "split_podium": 0, "tower": 0}
+        _unmatched = []
+        for _b in _buildings:
+            _fp = _corr_fp(clean_ring(_b["p"]))
+            _en = _by_fp.get(_fp)
+            if _en is None:
+                _out.append(_b)
+                continue
+            _by_fp.pop(_fp)
+            _act = _en["action"]
+            if _act == "drop_merged_into":
+                _n["drop"] += 1
+                continue
+            if _act == "merge_keep":
+                _nb = dict(_b)
+                _nb["h"] = float(_en["height_m"])
+                _nb["cdt_top"] = True  # 凹花瓣环：ear_clip 会卡住丢顶面，改走 CDT 顶
+                _nb["roof_parapet"] = True
+                _nb["equip"] = _en["roof"]["equip_boxes"]
+                _out.append(_nb)
+                _n["merge_keep"] += 1
+                continue
+            if _act == "podium":
+                _ring = clean_ring(_b["p"])
+                _poly = _ShpPolygon(_ring)
+                for _hh in _en["holes"]:
+                    _hfp = _corr_fp(clean_ring(_hh["ring"]))
+                    if _hfp != _hh["fp"]:
+                        raise SystemExit(f"overlap-complex: podium hole fp mismatch "
+                                         f"(entry {_hh['fp']} vs ring {_hfp}); refusing to build")
+                    _poly = _poly.difference(_ShpPolygon(clean_ring(_hh["ring"])))
+                if _poly.geom_type == "MultiPolygon":
+                    # 减洞后退化 MultiPolygon：洞环贴着裙楼外边（68510 sliver
+                    # 洞）会切出面积为 0 的幽灵片；只留非退化片，恰一片时用
+                    # 它，多片非退化 = 真分裂，改走 split_podium。
+                    _parts = [g for g in _poly.geoms if g.area >= 0.01]
+                    if len(_parts) != 1:
+                        raise SystemExit(
+                            f"overlap-complex: podium-minus-towers split into "
+                            f"{len(_parts)} non-degenerate pieces; use split_podium")
+                    _poly = _parts[0]
+                if not _poly.is_valid or _poly.geom_type != "Polygon":
+                    raise SystemExit("overlap-complex: podium-minus-towers is not a valid Polygon")
+                _nb = dict(_b)
+                _nb["p"] = [[float(a), float(c)] for a, c in list(_poly.exterior.coords)[:-1]]
+                _nb["holes"] = [[[float(a), float(c)] for a, c in list(_it.coords)[:-1]]
+                                for _it in _poly.interiors]
+                _nb["h"] = float(_en["height_m"])
+                _g = _ground_by_podium_fp.get(_fp)
+                if _g is None:
+                    raise SystemExit(f"overlap-complex: podium {_fp} has no ground_ref; "
+                                     f"refusing to build")
+                _nb["y0_abs"] = float(_g)
+                _nb["y1_abs"] = float(_g) + float(_en["height_m"])
+                _nb["roof_parapet"] = True
+                _nb["equip"] = _en["roof"]["equip_boxes"]
+                _out.append(_nb)
+                _n["podium"] += 1
+                continue
+            if _act == "split_podium":
+                # 一栋楼进、多片楼出：每片按 podium 同法（减洞、定绝对高、
+                # 女儿墙 + 设备盒）；洞环指纹不匹配大声失败。
+                for _pc in _en["pieces"]:
+                    _pring = clean_ring(_pc["ring"])
+                    _ppoly = _ShpPolygon(_pring)
+                    for _hh in _pc.get("holes", []):
+                        _hfp = _corr_fp(clean_ring(_hh["ring"]))
+                        if _hfp != _hh["fp"]:
+                            raise SystemExit(f"overlap-complex: split piece "
+                                             f"{_pc['piece_id']} hole fp mismatch "
+                                             f"(entry {_hh['fp']} vs ring {_hfp}); "
+                                             f"refusing to build")
+                        _ppoly = _ppoly.difference(_ShpPolygon(clean_ring(_hh["ring"])))
+                    if _ppoly.geom_type == "MultiPolygon":
+                        # 同裙楼：洞环贴边切出的 0 面积幽灵片只留非退化片，
+                        # 恰一片时用它，多片非退化 = 真分裂。
+                        _parts = [g for g in _ppoly.geoms if g.area >= 0.01]
+                        if len(_parts) != 1:
+                            raise SystemExit(
+                                f"overlap-complex: split piece "
+                                f"{_pc['piece_id']} minus-towers split into "
+                                f"{len(_parts)} non-degenerate pieces")
+                        _ppoly = _parts[0]
+                    if not _ppoly.is_valid or _ppoly.geom_type != "Polygon":
+                        raise SystemExit(f"overlap-complex: split piece "
+                                         f"{_pc['piece_id']} minus-towers is not a "
+                                         f"valid Polygon")
+                    _pg = _ground_by_piece.get(_pc["piece_id"])
+                    if _pg is None:
+                        raise SystemExit(f"overlap-complex: split piece "
+                                         f"{_pc['piece_id']} has no ground_ref; "
+                                         f"refusing to build")
+                    _nb = dict(_b)
+                    _nb["p"] = [[float(a), float(c)] for a, c in
+                                list(_ppoly.exterior.coords)[:-1]]
+                    _nb["holes"] = [[[float(a), float(c)] for a, c in
+                                     list(_it.coords)[:-1]]
+                                    for _it in _ppoly.interiors]
+                    _nb["h"] = float(_pc["height_m"])
+                    _nb["y0_abs"] = float(_pg)
+                    _nb["y1_abs"] = float(_pg) + float(_pc["height_m"])
+                    _nb["roof_parapet"] = True
+                    _nb["equip"] = _pc["roof"]["equip_boxes"]
+                    _out.append(_nb)
+                    _n["split_podium"] += 1
+                continue
+            if _act == "tower":
+                _ring = clean_ring(_b["p"])
+                _htot = float(_en["height_m"])
+                _base = float(_en["base_m"])
+                _cr = _en["crown"]
+                _nb = dict(_b)
+                _gt = _tower_ground(_en)
+                _nb["y0_abs"] = float(_gt) + _base
+                _nb["y1_abs"] = float(_gt) + _htot
+                _tp = _ShpPolygon(_ring)
+                _crown_rings = []
+                for _inset, _ya, _yb in (
+                        (float(_cr["inset1_m"]), _nb["y1_abs"] - float(_cr["shaft_top_m"]),
+                         _nb["y1_abs"] - float(_cr["mid_top_m"])),
+                        (float(_cr["inset2_m"]), _nb["y1_abs"] - float(_cr["mid_top_m"]),
+                         _nb["y1_abs"])):
+                    # 短塔 stub：冠顶退台落在裙楼顶之下时该层高为零，跳过（不建
+                    # 倒置/零高棱柱）。stub < 1.5m 用平顶（两层全零 → 无冠顶，
+                    # 纯棱柱）；1.5m ≤ stub < 4.0m 用单级退台（只留 -1.5m 一层）；
+                    # stub ≥ 4.0m 两级退台不变。0108（stub 0.7m）、0090（stub
+                    # 3.9m），2026-11-26 总协调定。
+                    if _yb <= _ya:
+                        continue
+                    _q = _tp.buffer(-_inset)
+                    if _q.is_empty or _q.geom_type != "Polygon":
+                        print(f"WARN overlap-complex: tower {_fp} crown inset "
+                              f"{_inset}m failed; tower stays plain prism")
+                        _crown_rings = []
+                        break
+                    _crown_rings.append(([[float(a), float(c)] for a, c in
+                                          list(_q.exterior.coords)[:-1]], _ya, _yb))
+                if _crown_rings:
+                    _nb["crown_rings"] = _crown_rings
+                    _nb["crown_shaft_top"] = _crown_rings[0][1]
+                _out.append(_nb)
+                _n["tower"] += 1
+                continue
+            raise SystemExit(f"overlap-complex: unknown action {_act}")
+        for _fp, _en in _by_fp.items():
+            _unmatched.append((_en["action"], _en.get("raw_idx")))
+        if _unmatched:
+            raise SystemExit(f"overlap-complex: {_unmatched} layer entries did not match "
+                             f"any building; refusing to build")
+        print(f"overlap-complex {_layer.get('version')} applied: merge_keep {_n['merge_keep']}, "
+              f"drop {_n['drop']}, podium {_n['podium']}, split_podium {_n['split_podium']}, "
+              f"tower {_n['tower']} "
+              f"-> {len(_out)} buildings (was {len(_buildings)})")
+        return _out
+    buildings = _apply_overlap_complex(buildings)
     rivers = cw["rivers"]; water = cw["water"]; fabric = cw["fabric"]
     landmarks = cw["landmarks"]
 
@@ -748,6 +1095,15 @@ def main():
             continue
         if r["osm_id"] in elev_info:
             continue
+        if r.get("tunnel") == "yes":
+            # 2026-11-26 修底子：隧道段在地下，不画地面线/带面（修前是按普通路画在地面上）；
+            # 只记入 tunnels 键计数（洞口另见 tunnel_portals）。building_passage 不算隧道，照常画地面。
+            pf = r["points_flat"]
+            pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
+            for i in range(len(pts)-1):
+                mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
+                ck(mx, mz)["tunnels"].append((pts[i], pts[i+1]))
+            continue
         pf = r["points_flat"]
         pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
         if len(pts) < 2: continue
@@ -765,13 +1121,57 @@ def main():
                 ck(mx, mz)["road_ribbons"].append((pts[i], pts[i+1], _hw2, rgb))
     # v3: 绿道（路名含“绿道”的全部 155 条，含高空栈道桥段）画 4m 绿带
     for r in roads_all["roads"]:
+        if r.get("tunnel") == "yes":
+            continue  # 2026-11-26 修底子：隧道段绿道也不画地面绿带（全框 2 条）
         if "绿道" in (r.get("name") or ""):
             pf = r["points_flat"]
             pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
             for i in range(len(pts)-1):
                 mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
                 ck(mx, mz)["greenway"].append((pts[i], pts[i+1]))
-    # v3: 水用 batch1 water-v1（线 4,089 + 面 1,892）+ 8 大湖已拼 multipolygon；
+    # ---- 2026-11-26 修底子：隧道洞口（主干车行隧道）----
+    # 洞口 = tunnel=yes 的车行路端点，且该端点连着非隧道地面路（与地面交接处，OSM 节点共享判定）。
+    # 位置/走向/半宽取自 OSM 原值（半宽取 road-widths-v1，缺省按 DECK_FALLBACK_HALF）；
+    # 洞门框尺寸（柱 0.8m 见方、净空 4.5m、顶梁高 1.0m、框面在洞口外 0.4m）为示意尺寸，非实测。
+    # 只做主干车行隧道（motorway/trunk/primary/secondary/tertiary + 各 _link）；
+    # 人行/非机动车/服务路隧道只记 tunnels 计数，洞口待后续；地铁/国铁隧道不在此列（洞口是车站）。
+    _PORTAL_HW = {"motorway", "motorway_link", "trunk", "trunk_link", "primary",
+                  "primary_link", "secondary", "secondary_link", "tertiary", "tertiary_link"}
+    _node_ways = {}
+    for _r in roads_all["roads"]:
+        _pf = _r.get("points_flat") or []
+        _pp = [(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+        if len(_pp) < 2: continue
+        for _j in (0, len(_pp)-1):
+            _node_ways.setdefault((round(_pp[_j][0], 7), round(_pp[_j][1], 7)), []).append(_r)
+    _portal_n = 0
+    for _r in roads_all["roads"]:
+        if _r.get("tunnel") != "yes" or _r.get("highway") not in _PORTAL_HW:
+            continue
+        _pf = _r.get("points_flat") or []
+        _pp = [lonlat_to_m(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+        if len(_pp) < 2: continue
+        _w = width_by_id.get(_r["osm_id"])
+        _half = (_w[0] / 2.0) if _w else DECK_FALLBACK_HALF.get(_r["highway"], 5.0)
+        _wsrc = _w[1] if _w else "fallback"
+        for _end in (0, 1):
+            _lonlat = (_pf[0], _pf[1]) if _end == 0 else (_pf[-2], _pf[-1])
+            _key = (round(_lonlat[0], 7), round(_lonlat[1], 7))
+            _nbrs = [o for o in _node_ways.get(_key, []) if o["osm_id"] != _r["osm_id"]]
+            if not any(o.get("tunnel") in (None, "no", False) for o in _nbrs):
+                continue  # 端点只连隧道段（延续）或悬空：不是洞口
+            if _end == 0:
+                _dx, _dz = _pp[0][0]-_pp[1][0], _pp[0][1]-_pp[1][1]
+            else:
+                _dx, _dz = _pp[-1][0]-_pp[-2][0], _pp[-1][1]-_pp[-2][1]
+            _hd = math.degrees(math.atan2(_dz, _dx))
+            _p = _pp[0] if _end == 0 else _pp[-1]
+            if not _in6(_p[0], _p[1]):
+                continue
+            ck(_p[0], _p[1])["tunnel_portals"].append((_p[0], _p[1], _hd, _half, _r.get("name") or "", _wsrc))
+            _portal_n += 1
+    print(f"tunnel portals (vehicle, to-surface, in six districts): {_portal_n}")
+    # v3: 水用 batch1 water-v1（线 4,089 + 面 1,891）+ 11 条湖记录（9 个湖名）已拼 multipolygon；
     # 大湖面片与水面按分块裁剪入块；落在湖面片内的 water 面片去重
     if water_v1.get("water_lines") or water_v1.get("water_polys"):
         _lake_rings_lonlat = []
@@ -826,6 +1226,38 @@ def main():
                 continue  # 在湖环内且不在岛环内才去重；岛上水面（岛上池塘）保留
             _ringm = [lonlat_to_m(lon, lat) for lon, lat in _pts]
             bucket_poly(chunks, _ringm, C_WATER, "water")
+        # ---- 2026-11-26 修底子：河岸栏杆（river_rails），跟着河一起做 ----
+        # 沿真实水面边界走：water=river 的水面多边形边界（六区内 93 个）+ 六区内 5 条湖记录的外环。
+        # 栏杆 = 顶梁（边界折线，地面+1.1m）+ 立柱（沿边界每 ~10m 一根，地面→+1.1m），
+        # 元组 (a, b, kind)：kind 0 = 顶梁段，kind 1 = 立柱（a == b 的 xz）。
+        # 1.1m 高、10m 间距为示意尺寸，非实测；边界取自 OSM 原值。
+        # canal/stream/drain/ditch 不做栏杆（多为沟渠）；桥跨处未抠洞（已知局限，见报告）。
+        def _rail_ring(_ringm):
+            for i in range(len(_ringm)):
+                a = _ringm[i]; b = _ringm[(i+1) % len(_ringm)]
+                mx, mz = (a[0]+b[0])/2, (a[1]+b[1])/2
+                ck(mx, mz)["river_rails"].append((a, b, 0))
+                _el = math.hypot(b[0]-a[0], b[1]-a[1])
+                _npost = int(_el // 10.0)
+                for _k in range(1, _npost+1):
+                    _t = _k*10.0/_el
+                    _px = a[0]+(b[0]-a[0])*_t; _pz = a[1]+(b[1]-a[1])*_t
+                    ck(_px, _pz)["river_rails"].append(((_px, _pz), (_px, _pz), 1))
+        _rail_n = 0
+        for _wp in water_v1.get("water_polys", []):
+            if _wp.get("water") != "river": continue
+            _pts = _wp.get("points") or []
+            if len(_pts) < 3: continue
+            _ringm = [lonlat_to_m(lon, lat) for lon, lat in _pts]
+            if not any(_in6(x, z) for x, z in _ringm): continue
+            _rail_ring(_ringm); _rail_n += 1
+        for _lk in lakes.get("lakes", []):
+            if not _lk.get("rings"): continue
+            _outer = max(_lk["rings"], key=lambda r: r["area_m2"])
+            _ringm = [lonlat_to_m(lon, lat) for lon, lat in _outer["points"]]
+            if not any(_in6(x, z) for x, z in _ringm): continue
+            _rail_ring(_ringm); _rail_n += 1
+        print(f"river rails: {_rail_n} water boundaries (river polys + lake outer rings in six districts)")
         for _wl in water_v1.get("water_lines", []):
             _pts = [lonlat_to_m(lon, lat) for lon, lat in (_wl.get("points") or [])]
             for i in range(len(_pts)-1):
@@ -1128,6 +1560,20 @@ def main():
             if len(pts) >= 2: _ways.append(pts)
         if not _ways: return None
         if len(_ways) == 1: return _ways[0]
+        # 2026-11-26 方向归一（双向桥 bug 修）：成对双向桥的两条 way 在 OSM 里
+        # 方向相反（各行其道），直接按同 frac 取点平均会把 600m 桥面压成几米的点团
+        # （修前实测：九眼桥 226m 桥 9 孔拱 144 个顶点压进 1.4m×0.0m；云龙湾/
+        # 天保湾/锦江斜拉/天府大道月牙桥同病，另 3 座在六区外本次不进包）。
+        # 以首条 way 为基准，其余 way 若反向（起止点与基准的终起点更近）先翻转再平均。
+        _ref = _ways[0]
+        _oriented = [_ref]
+        for _w in _ways[1:]:
+            _d_same = math.hypot(_w[0][0]-_ref[0][0], _w[0][1]-_ref[0][1]) + \
+                      math.hypot(_w[-1][0]-_ref[-1][0], _w[-1][1]-_ref[-1][1])
+            _d_opp = math.hypot(_w[0][0]-_ref[-1][0], _w[0][1]-_ref[-1][1]) + \
+                     math.hypot(_w[-1][0]-_ref[0][0], _w[-1][1]-_ref[0][1])
+            _oriented.append(list(reversed(_w)) if _d_opp < _d_same else _w)
+        _ways = _oriented
         _avg = []
         for _k in range(51):
             _f = _k/50.0
@@ -1441,11 +1887,29 @@ def main():
             for b in c["b"]:
                 ring = clean_ring(b["p"]); h = float(b["h"])
                 cx = sum(p[0] for p in ring)/len(ring); cz = sum(p[1] for p in ring)/len(ring)
-                y0 = ground(cx, cz)
-                prism(hi, ring, y0, y0+h, shade_by_height(h))
+                # overlap-complex 层可定绝对高程（塔基 = 裙楼顶面，保证塔基与裙楼顶严丝合缝）
+                y0 = float(b.get("y0_abs", ground(cx, cz)))
+                y1 = float(b.get("y1_abs", y0 + h))
+                rgb = shade_by_height(h)
+                if b.get("holes") is not None or b.get("cdt_top"):
+                    _holed_prism(hi, ring, b.get("holes") or [], y0, y1, rgb)
+                elif b.get("crown_rings"):
+                    prism(hi, ring, y0, b["crown_rings"][0][1], rgb)
+                    for (_cring, _ca, _cb) in b["crown_rings"]:
+                        prism(hi, _cring, _ca, _cb, rgb)
+                else:
+                    prism(hi, ring, y0, y1, rgb)
+                if b.get("roof_parapet"):
+                    _parapet(hi, ring, y1, 0.5, 0.3, rgb)
+                for _bx in b.get("equip", []):
+                    _ex, _ez = float(_bx["x"]), float(_bx["z"])
+                    _ew, _ed, _eh = float(_bx["w"]), float(_bx["d"]), float(_bx["h"])
+                    prism(hi, [[_ex - _ew / 2, _ez - _ed / 2], [_ex + _ew / 2, _ez - _ed / 2],
+                               [_ex + _ew / 2, _ez + _ed / 2], [_ex - _ew / 2, _ez + _ed / 2]],
+                          y1, y1 + _eh, [0.95, 0.95, 0.95])
                 xs = [p[0] for p in ring]; zs = [p[1] for p in ring]
                 box = [[min(xs), min(zs)], [max(xs), min(zs)], [max(xs), max(zs)], [min(xs), max(zs)]]
-                prism(mid, box, y0, y0+h, shade_by_height(h))
+                prism(mid, box, y0, y1, rgb)
             for (a, b, rgb) in c["roads"]:
                 hl.seg([a[0], gy(a[0], a[1])+0.3, a[1]], [b[0], gy(b[0], b[1])+0.3, b[1]], rgb)
             for (a, b, hw2, rgb) in c["road_ribbons"]:
@@ -1474,12 +1938,41 @@ def main():
                 _yb = _XL_LEVEL+0.15 if _in_xinglong(b[0], b[1]) else gy(b[0], b[1])+0.15
                 hl.seg([a[0], _ya, a[1]], [b[0], _yb, b[1]], C_WATER)
                 ml.seg([a[0], _ya, a[1]], [b[0], _yb, b[1]], C_WATER)
+            for (a, b, kind) in c["river_rails"]:
+                # 2026-11-26 修底子：河岸栏杆。kind 0 顶梁（地面+1.1m），kind 1 立柱（地面→+1.1m）。
+                if kind == 1:
+                    _yb0 = gy(a[0], a[1])
+                    hl.seg([a[0], _yb0, a[1]], [a[0], _yb0+1.1, a[1]], C_RAIL)
+                    ml.seg([a[0], _yb0, a[1]], [a[0], _yb0+1.1, a[1]], C_RAIL)
+                else:
+                    _ya = gy(a[0], a[1])+1.1; _yb = gy(b[0], b[1])+1.1
+                    hl.seg([a[0], _ya, a[1]], [b[0], _yb, b[1]], C_RAIL)
+                    ml.seg([a[0], _ya, a[1]], [b[0], _yb, b[1]], C_RAIL)
+            for (x, z, hd, half_w, _nm, _ws) in c["tunnel_portals"]:
+                # 2026-11-26 修底子：隧道洞门框（high 档）。两根边柱 + 顶梁，横跨路宽，面朝洞外方向 hd。
+                # 尺寸示意（柱 0.8m 见方、净空 4.5m、梁高 1.0m、框面在洞口外 0.4m）；位置/走向/半宽取自 OSM。
+                _y0 = gy(x, z)
+                _ux, _uz = math.cos(math.radians(hd)), math.sin(math.radians(hd))
+                _vx, _vz = -_uz, _ux
+                _hw2 = half_w + 0.8
+                _fx, _fz = x - _ux*0.4, z - _uz*0.4
+                for _s in (-1, 1):
+                    _px = _fx + _vx*_s*_hw2; _pz = _fz + _vz*_s*_hw2
+                    _corn = [[_px + _vx*0.4*_a + _ux*0.4*_b, _pz + _vz*0.4*_a + _uz*0.4*_b]
+                             for _a, _b in [(-1, -1), (1, -1), (1, 1), (-1, 1)]]
+                    prism(hi, _corn, _y0, _y0+5.5, C_PORTAL)
+                _lx1, _lz1 = _fx - _vx*_hw2, _fz - _vz*_hw2
+                _lx2, _lz2 = _fx + _vx*_hw2, _fz + _vz*_hw2
+                _bx, _bz = _ux*0.5, _uz*0.5
+                prism(hi, [[_lx1-_bx, _lz1-_bz], [_lx2-_bx, _lz2-_bz],
+                          [_lx2+_bx, _lz2+_bz], [_lx1+_bx, _lz1+_bz]], _y0+4.5, _y0+5.5, C_PORTAL)
             for (ring, rgb) in c["water"]:
                 _cx = sum(p[0] for p in ring)/len(ring); _cz = sum(p[1] for p in ring)/len(ring)
                 _wy = ground(_cx, _cz)+0.15
                 if _xl_ring and (_in_xinglong(_cx, _cz) or any(_in_xinglong(p[0], p[1]) for p in ring)):
                     _wy = _XL_LEVEL+0.15  # 顶点/中心在兴隆湖环内或环上：按官方湖面 464m
                 flat_poly(hi, ring, _wy, rgb)
+                flat_poly(mid, ring, _wy, rgb)  # 2026-11-26 修底子：水面进 mid 档（修前 mid 无水，远看河湖消失）
             for (ring, rgb) in c["water_islands"]:
                 # v3.2 第 16 项：岛塞（陆地绿，盖在水面之上 0.15m；兴隆湖岛按官方湖面高）
                 _cx = sum(p[0] for p in ring)/len(ring); _cz = sum(p[1] for p in ring)/len(ring)
@@ -1490,6 +1983,7 @@ def main():
                 for (a, b, cc) in _tris:
                     hi.tri([_pts[a][0], _wy, _pts[a][1]], [_pts[b][0], _wy, _pts[b][1]],
                            [_pts[cc][0], _wy, _pts[cc][1]], [0, 1, 0], rgb)
+                flat_poly(mid, ring, _wy, rgb)  # 2026-11-26 修底子：岛塞进 mid 档（与水面同高，避免远看岛浮在无水地面上）
             for (ring, rgb) in c["landuse"]:
                 _cx = sum(p[0] for p in ring)/len(ring); _cz = sum(p[1] for p in ring)/len(ring)
                 flat_poly(hi, ring, ground(_cx, _cz)+0.04, rgb)
@@ -1637,6 +2131,11 @@ def main():
                    "station_hall": len(c["station_hall"]),
                    "station_platform": len(c["station_platform"]),
                    "water_islands": len(c["water_islands"]),
+                   "rivers": len(c["rivers"]),
+                   "water": len(c["water"]),
+                   "tunnels": len(c["tunnels"]),
+                   "tunnel_portals": len(c["tunnel_portals"]),
+                   "river_rails": len(c["river_rails"]),
                    "flowers": len(c["flowers"]),
                    "landmarks": len(c["landmarks"]),
                    "elevated_segs": len(c["elev"]),
@@ -1685,7 +2184,7 @@ def main():
             for tz in range(tz0, tz1+1):
                 tag = f"t_{tx}_{tz}"
                 path = os.path.join(OUT, "terrain", f"{tag}.glb")
-                if not _tile_hits_6(tx, tz):
+                if not (_tile_hits_6(tx, tz) or _tile_hits_ring(tx, tz)):
                     continue
                 if os.path.exists(path) and log["done"].get(tag):
                     terr_index[tag] = log["done"][tag]; continue
@@ -1746,14 +2245,14 @@ def main():
     heights_md5 = _hh.hexdigest()
     json.dump({"chunks": merged, "format_version": FORMAT_VERSION, "generated": "2026-11-25",
                "heights": args.heights, "heights_md5": heights_md5,
-               "source": f"{args.heights} (md5 {heights_md5}) + city-wide.json + roads-all-levels-v1.json + bridges-v1.json + metro.json + compound-names.json + railway-v1.json (PBF实抽) + toll-booths-v1.json (PBF实抽) + chengdu-dem-90m-full-latlon.npy 6-tile Copernicus (read-only; 兴隆湖湖面压到 464m) + water-v1.json + lakes-assembled-v1.json + landuse-v1.json + road-widths-v1.json + national-rail-v1.json + lamps-city + worldcover-bone-bbox-10m.npz + street-trees-v1.json + aeroway-v1.json + mountain-pois-v1.json + bridge-shapes.json + lake-islands-v1.json (v3.2 岛塞) + metro-stations-geometry-v1.json (v3.2 站厅/站台) + bridge-tunnel-lamps tiles (v3.2 桥隧灯) + flowers-geometry-v1.json (v3.2 花坛，PBF实抽)",
+               "source": f"{args.heights} (md5 {heights_md5}) + city-wide.json + roads-all-levels-v1.json + bridges-v1.json + metro.json + compound-names.json + railway-v1.json (PBF实抽) + toll-booths-v1.json (PBF实抽) + chengdu-dem-90m-full-latlon.npy 6-tile Copernicus (read-only; 兴隆湖湖面压到 464m) + water-v1.json + lakes-assembled-v1.json + landuse-v1.json + road-widths-v1.json + national-rail-v1.json + lamps-city + worldcover-bone-bbox-10m.npz + street-trees-v1.json + aeroway-v1.json + mountain-pois-v1.json + bridge-shapes.json + lake-islands-v1.json (v3.2 岛塞) + metro-stations-geometry-v1.json (v3.2 站厅/站台) + bridge-tunnel-lamps tiles (v3.2 桥隧灯) + flowers-geometry-v1.json (v3.2 花坛，PBF实抽) + tunnels-v1.json (2026-11-26: tunnel=yes 排除地面画法；主干车行隧道洞口为示意尺寸洞门框） + river_rails (2026-11-26: water=river 边界 + 湖外环，示意 1.1m 高/10m 间距） + building-corrections-v1.json (2026-11-26: 建筑足迹修正层 134 条 clip/delete/add，见 virtual-city/data/building-corrections-v1.json)",
                "elevated_note": "metro elevated deck 9.0m pending-verification",
                "interchange_note": "elevated ways (§7.14): own_deck>0 roads drawn at interpolated deck heights (standard stacking rule L*6.9m: clearance 5.0m CJJ37-2012 + structure 1.9m, inferred; measured overrides: chengwen top 32m, fuqing crest 15m, second-ring range midpoint 12.0m; zero-flat 2026-11-25: all 9,399 bridges have numeric deck heights (river base 3.0m, rail viaduct base 7.5m, metro viaduct base 9.0m, footbridge river base 2.0m; methods+errors in bridges-v1.json); solid decks since 2026-11-25 (deck slabs: top+bottom+sides, 1.9m thick vehicle / 0.8m footbridge, width from road-widths-v1 or grade-tier median fallback, top face shaded by OSM layer L1 dark to L5 light, top face also in mid LOD; piers as solid 1.6m square columns every ~30m where deck>2m, ground to deck underside, pier positions schematic not surveyed; V-piers of curved special bridges stay as paired lines; 66.16m pier gap kept at Hongpailou paifang); toll booths as 3x4m marker boxes, plaza outlines as ground rings",
                "bridge_note": "non-elevated bridges (rail viaducts not in roads file) follow road level (flat lines); all deck_height_m numeric since 2026-11-25 zero-flat, estimates labelled with method+error in bridges-v1.json",
                "width_note": "carriageways drawn as ribbons from road-widths-v1.json (real-osm 150 + lanes-calc 6205 + grade-tier 52108 推算；footways stay lines); runway widths from OSM tags (45/60m), taxiway default 15m 推算",
                "dem_note": "DEM = 6-tile Copernicus GLO-30 (lon 102.8-105.0, lat 30.0-31.6), datum 506; old 4-tile chengdu-dem-90m.npy verified wrong and retired; core plain 478-568m mean 507.6 (flat, NOT a basin); Xinglong Lake cells flattened to 464m",
                "vegetation_note": "trees: WorldCover 10m tree mask sampled at 60m stride, hash-capped 200k, height 4-8m by hash (sampled/估算); OSM natural=tree 1207 at real positions (height by hash, 估算); flowerbeds v3.2: 26 OSM flowerbeds in bbox (25 ways + 1 node, PBF实抽几何；9 in 14km circle) drawn pink as flowers; gardens: 291 leisure=garden faces already in landuse as park (v3.1), not double-drawn",
-               "lakes_note": "8 big lakes assembled from OSM multipolygon relations by osmium export (real geometry); lake islands since v3.2: 135 islands listed, 134 drawn as land plugs on the water surface (island-plug method; 1 degenerate 6m2 hole skipped, not silently dropped; 2 small plugs err -9.5%/-6.1%; without scipy 38 plugs err >6%)",
+               "lakes_note": "11 lake entries (9 distinct names) assembled from OSM multipolygon relations by osmium export (real geometry); 5 entries inside six districts (北湖/锦城湖/白鹭湾x2/升仙湖), 6 outside by crop (龙泉湖/兴隆湖/麓湖/东安湖/青龙湖x2); 青龙湖 rel 10660802 geometry at lon 105.56 is corrupt in source, builds nothing; inner rings are island holes, skipped when matching lake-islands-v1.json (97 of 98 matched); lake islands since v3.2: 135 islands listed, 134 drawn as land plugs on the water surface (island-plug method; 1 degenerate 6m2 hole skipped, not silently dropped; 2 small plugs err -9.5%/-6.1%; without scipy 38 plugs err >6%)",
                "greenway_note": "greenways = roads whose name contains 绿道 (155 ways: 绕城绿道 84, 龙泉山森林绿道 33, 锦江绿道 16, 毗河绿道 11, others 11), drawn as 4m green ribbons"},
               open(idx_path, "w"))
     print(f"DONE chunks built this run: {done_n}/{len(keys)}")

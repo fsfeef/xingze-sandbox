@@ -10,8 +10,8 @@
  "counts": {
   "chunks": 2222,
   "rows": 71,
-  "buildings": 60601,
-  "road_segs": 130624,
+  "buildings": 60612,
+  "road_segs": 129715,
   "bridge_segs": 2552,
   "railway_segs": 17157,
   "compounds": 2613,
@@ -23,10 +23,10 @@
   "water_islands": 43,
   "flowers": 6,
   "landmarks": 25,
-  "elevated_segs": 19421,
-  "ramp_segs": 11256,
-  "deck_segs": 19421,
-  "piers": 18144,
+  "elevated_segs": 19373,
+  "ramp_segs": 11210,
+  "deck_segs": 19373,
+  "piers": 18149,
   "toll_booths": 36,
   "toll_plazas": 8,
   "landuse_polys": 11117,
@@ -37,16 +37,23 @@
   "lamps_tunnel": 2036,
   "trees": 13674,
   "greenway_segs": 1363,
-  "road_ribbons": 87238,
+  "road_ribbons": 86477,
   "runway_segs": 0,
   "aprons": 0,
   "special_lines": 120,
   "special_tris": 1,
   "vpiers": 6,
   "mt_pois": 18,
-  "tris_high": 1528804,
-  "tris_mid": 680393,
-  "terrain_tiles": 169,
+  "tris_high": 1557893,
+  "tris_mid": 692404,
+  "lines_high": 395374,
+  "lines_mid": 76246,
+  "rivers": 9531,
+  "water": 794,
+  "tunnels": 957,
+  "tunnel_portals": 369,
+  "river_rails": 21986,
+  "terrain_tiles": 2300,
   "far_terrain_tiles": 1909,
   "fabric_cells": 7569
  },
@@ -61,7 +68,7 @@
   },
   "terrain_tiles": {
    "full_city_v32": 2300,
-   "six_districts": 169
+   "six_districts": 2300
   },
   "far_terrain_tiles": {
    "full_city_v32": 1909,
@@ -84,7 +91,8 @@
   "entrances_est": "地铁口估算 v1 (metro-entrances-estimated-v1.json): 161 stations, 714 exits; 446 inside six districts. EVERY exit method=推算, verification_status=未核对. Rendered as amber pavilions, counted separately from the 572 OSM entrances. NEVER treat as measured.",
   "heights": "per-building height_source / height_confidence kept from v2.1 (measured osm/ctbuh/verified vs estimated globfp/inferred_spatial/levels). No CNBH/CMAB values, no random jitter.",
   "bridges": "A8 heights (CJJ37/CJJ11 stacking, deck=L*6.9m); 2,938 base-value inferred heights labelled inferred in bridges-v1.json.",
-  "far_terrain": "copied verbatim from v3.2 terrain/far (1,909 tiles, build_far_terrain.py, 3960m tiles, 495m sampling). NOT rebuilt, NOT filtered."
+  "far_terrain": "copied verbatim from v3.2 terrain/far (1,909 tiles, build_far_terrain.py, 3960m tiles, 495m sampling). NOT rebuilt, NOT filtered.",
+  "river_lake_tunnel_2026_11_26": "2026-11-26 river/lake/tunnel repair (build_six.py patch, 677 chunks regenerated, 1,354 GLBs rewritten, 0 errors). road_segs 130624->129715 (-909 ground tunnel segs removed), road_ribbons 87238->86477, elevated/deck 19421->19373 (-48: 46 SCOPE + 2 layer=1 tunnel ways), ramp_segs 11256->11210 (-46), piers 18144->18147 (+3 from height-estimate shifts after tunnel ways left the elev set), tris_high 1528804->1538382 (+9578), tris_mid 680393->692294 (+11901: mid water added). rivers 9531 = GLB census of water line segs (index recs sum only 4038 because non-regenerated chunks predate the rivers field). water 794 = water pieces across 510 chunks. tunnels 957 = 909 formerly ground + 48 formerly elevated. tunnel_portals 369 = vehicle portals with frame geometry (schematic dims: 0.8m posts, 4.5m clearance, 1.0m lintel). river_rails 21986 = railing line segs (river banks + lake outer rings, schematic 1.1m high / ~10m posts). terrain_tiles 2300 was already synced by the terrain lane (11:47); this edit did not touch it. Full report: virtual-city/river-lake-tunnel-2026-11-26.md."
  },
  "dropped_outside_districts": {
   "buildings": 23960,

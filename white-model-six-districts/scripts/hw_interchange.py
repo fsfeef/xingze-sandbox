@@ -239,6 +239,14 @@ def reconcile(info, roads_by_id, nodes, bdeck, rounds=3):
             # 代价：桥台处桥面与地面引道存在高差台阶（引道爬坡未建模），见 GAPS。
             if (d.get("own_meth") or "").endswith("distinctive-bridge-shape-7.12"):
                 continue
+            # 2026-11-26 实测 pin：own deck 来自 bridges-v1.json 实测点值
+            # （bridge-deck:measured_chengwen_top_32m / measured_fuqing_crest_15m）
+            # 的路，端点同样不许被节点共识拉平；否则实测值丢回推算值——
+            # 修前实测：府青 695763874/875 两端全被拉到 6.9m（实测 15.0m 丢失），
+            # 成温 693890118 一端被拉到 13.8m（实测 32.0m）。代价与特型桥 pin 相同：
+            # 桥台处可能留高差台阶（引道爬坡未建模）。
+            if (d.get("own_meth") or "").startswith("bridge-deck:measured_"):
+                continue
             r = d["road"]
             pts = way_pts(r)
             for end_idx, attr in ((0, "start_h"), (len(pts) - 1, "end_h")):
