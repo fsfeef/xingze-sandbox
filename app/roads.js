@@ -505,10 +505,11 @@ function buildRoadSurface(THREE, data, group) {
   }
   const matMain = new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -2 });
   const matSub = new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
-  for (const [builder, mat] of [[main, matMain], [sub, matSub]]) {
+  for (const [builder, mat, gray] of [[main, matMain, 0x7E8490], [sub, matSub, 0x979DA8]]) {
     const m = new THREE.Mesh(builder.buildGeometry(), mat);
     m.matrixAutoUpdate = false; m.updateMatrix();
     m.userData.__keepColor = true; // 白膜下不漂白：带面是路的本体（16:28 令第 2 条），漂了航拍就没路
+    m.userData.__roadSurface = true; m.userData.__roadGray = gray; // 白膜下路面改灰（22:37 令：对参考站灰带子，不用黑沥青）
     group.add(m);
   }
   _stats.surfaceKm = +(km / 1000).toFixed(1);
@@ -919,6 +920,7 @@ function buildBridges(THREE, data, group) {
     new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
   deckSurfMesh.matrixAutoUpdate = false; deckSurfMesh.updateMatrix();
   deckSurfMesh.userData.__keepColor = true; // 桥面带也是路面，白膜下不断色
+  deckSurfMesh.userData.__roadSurface = true; deckSurfMesh.userData.__roadGray = 0x7E8490; // 桥面同主干灰（22:37）
   _steelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.45, metalness: 0.6 });
   const steelMesh = new THREE.Mesh(steel.buildGeometry(), _steelMat);
   steelMesh.matrixAutoUpdate = false; steelMesh.updateMatrix();
@@ -1446,7 +1448,7 @@ function _whitewash(on) {
   if (!_group) return;
   _group.traverse((o) => {
     if (!o.isMesh) return;
-    if (o.userData.__keepColor) return; // 路的本体不漂白：带面+标线+桥面带（16:28 令第 2 条）；
+    if (o.userData.__keepColor && !o.userData.__roadSurface) return; // 标线等保持原色；路面单独改灰，见下
     // 与 17:06“颜色全撤”的调和——全撤管的是楼/车/牌/桥钢等一切配色，路的本体是骨架例外。
     const mats = Array.isArray(o.material) ? o.material : [o.material];
     for (const m of mats) {
@@ -1461,7 +1463,7 @@ function _whitewash(on) {
         }
         if (m.blending === _THREE.AdditiveBlending) { o.visible = false; continue; }
         m.vertexColors = false;
-        if (m.color) m.color.setHex(_CLAY);
+        if (m.color) m.color.setHex(o.userData.__roadSurface ? (o.userData.__roadGray || 0x8E939C) : _CLAY);
         if (m.emissive) { m.emissive.setHex(0x000000); m.emissiveIntensity = 0; }
         if (m.map) { m.map = null; m.needsUpdate = true; } // 贴图也撤：路名牌深蓝底是贴图，只改 color 盖不住
       } else {
