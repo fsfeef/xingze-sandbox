@@ -104,7 +104,7 @@ const state = {
   fov: 55,
   hour: 10, playing: false,
   night: 0,                              // 0 白天 … 1 深夜
-  display: 'normal',                     // normal | heat | white
+  display: 'white',                     // normal | heat | white（默认白膜：白天航拍干净浅灰白块）
   bloom: false,
   tour: false,
   carView: 'follow',                     // follow | interior
@@ -580,6 +580,7 @@ const SKY_STOPS = [
   { h: 24, sky: 0x0b1026, fog: 0x0b1026, sun: 0x223355, sunI: 0.05, hemiI: 0.25, night: 1 },
 ];
 const _c1 = new THREE.Color(), _c2 = new THREE.Color();
+let _autoNight = false; // 昼夜自动切显示的上一状态（false 白天）
 function applyTime(hour) {
   state.hour = hour;
   let a = SKY_STOPS[0], b = SKY_STOPS[SKY_STOPS.length - 1];
@@ -597,6 +598,14 @@ function applyTime(hour) {
   // 夜色传播给接线模块（roads 灯光池/路面微光、sun 亮窗 shader；各自幂等）
   if (window.__roads && window.__roads.setNight) { try { window.__roads.setNight(state.night); } catch (e) { /* 夜色传播失败不阻断时间轴 */ } }
   if (window.__dSunNight && window.__dSunNight.setNight) { try { window.__dSunNight.setNight(state.night); } catch (e) { /* 同上 */ } }
+  if (window.__roofsApi && window.__roofsApi.setNight) { try { window.__roofsApi.setNight(state.night); } catch (e) { /* 同上 */ } }
+  // 白模阶段锁死白膜：夜里也不切回正常（2026-11-26 17:06 令：游戏里颜色全撤）
+  // 只在昼夜边界切换时动一次；手动白膜按钮在其间不受顶（applyTime 只在时间变化时跑）
+  const _isNight = state.night >= 0.5;
+  if (_isNight !== _autoNight) {
+    _autoNight = _isNight;
+    if (state.display === 'white' || state.display === 'normal') setDisplay('white');
+  }
   const winGlow = state.night;
   for (const m of Object.values(facadeMats)) m.emissiveIntensity = winGlow * 1.7;
   if (lampHeadMat) lampHeadMat.emissiveIntensity = 0.05 + winGlow * 2.4;
@@ -1289,6 +1298,7 @@ async function init() {
       $('#mock-badge').style.display = 'none';
       $('#data-note').textContent = `六区白模 ${six.meta.version}：${six.counts.buildings.toLocaleString()} 栋楼 · ${six.counts.road_segs.toLocaleString()} 段路 · ${six.counts.stations} 个地铁站（572 实测口 + 446 推算口，未核对）· ${six.counts.landmarks} 个地标 · 桥 ${six.counts.bridge_segs} 段 · 路灯 ${six.counts.lamps.toLocaleString()} 盏 · 树 ${six.counts.trees.toLocaleString()} 棵`;
       applyTime(10);
+      setDisplay('white'); // 默认白膜：白天航拍干净浅灰白块（16:28 令）；白模阶段夜里也不切回正常（17:06 令）
       syncCamera();
       await renderer.compileAsync(scene, camera);
       $('#loading-overlay').style.display = 'none';

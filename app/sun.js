@@ -1,4 +1,4 @@
-// 星泽市 · 日照分析（D 路 sun.js，v3.2：13:52 从 Phase 3 提前到现在做）
+// 星泽市 · 太阳与黄昏光（D 路 sun.js）：真太阳位置 + 金色时刻 + 夜景灯光。日照分析面板已拿掉（2026-11-26 老大令：游戏不要查看器功能）。
 // 太阳模拟真的太阳去转动着照：纬度 30.66°（六区中心纬度），真太阳时。
 // 算法：标准太阳位置公式（赤纬 + 均时差 + 时角），不抄参考站的代码，只用公开天文公式。
 //   赤纬 δ = 23.45°·sin(360·(284+N)/365)，N 为年积日
@@ -41,6 +41,21 @@
 //    window.__dSunNight = { setNight(n), patchMaterial(mat), materials(), stats() }
 // 可移植：只用相对路径 ./shell-overrides.css，不依赖本机绝对路径；
 // localhost:8000 起服务就能跑（验证以后搬到八核三十二G那台也一样）。
+// ── 第三段（2026-11-26，林萧 16:21“用起来、学起来”+ 16:23 技能令）──
+//    per-simmons/unreal-agent-harness 的方法论只学思路，不抄代码、不拿资产
+//    （该仓库无 LICENSE，不能直接当开源免费商用）：① PCG 分阶段生成 +
+//    agent 自己截图 QA（act→capture→refdiff→fix）的循环 → 本段只做参数
+//    化 + 可断言的纯函数 + 截图验，不改结构；② PBR + 发光窗 →
+//    WINDOW_PARAMS（见下）：发光窗按色温分层、逐块亮度抖动；③ 夜景只
+//    做到黄昏/金色时刻 → DUSK（见下）：金色时刻跟真太阳高度走，不跟
+//    时钟走（app.js 的黄昏档是时钟固定 18.5，冬至日落 18:03、夏至日落
+//    约 20:00，固定档在两头都错位）。夜景验收三条不变：分层亮窗比
+//    0.65/0.40/0.20、12m×2 层成片亮、不逐窗噪点；白模先行，不贴图、不 FLUX。
+//    技能（先读 SKILL.md 再写）：threejs-materials-lighting（主光 2–3、
+//    半球光填充、ACES、emissive 走 PBR）；threejs-scene-setup（dt 钳制
+//    0.05、像素比与循环归 app.js 管，本模块不另起 setAnimationLoop）；
+//    threejs-gltf-loading / project-settings / lucian-uxui 见报告对照表
+//    （本段未用，原因写在 ~/workspace/virtual-city/tests/lane4-s3-dusk-verify.mjs 头注 + 段报告里）。
 
 const LAT = 30.66;          // 六区中心纬度（°）
 const LON = 104.06;         // 六区中心经度（°），只用于真太阳时换算
@@ -55,15 +70,74 @@ const PRESETS = {
 };
 
 let ctx = null, THREE = null;
-let panel = null, sunBtn = null;
+
 let sunLight = null, moonLight = null;
-let arcLine = null, sunDisc = null, tintPlane = null, lmDots = [];
+let sunDisc = null;
 let raf = 0, lastT = 0;
-const S = { on: false, preset: 'spring', display: 'normal', hour: 10 };
+const S = { preset: 'spring', display: 'normal', hour: 10 };
+
+// ---------- 第三段参数：发光窗 PBR + 黄昏（单一来源，weather.js 只读这里） ----------
+// WINDOW_PARAMS：亮窗的全部可调参数。分层亮窗比与成片块尺寸是已验收结构，
+// 一律不动；只调色温分层、发光强度、逐块亮度抖动三处。
+const WINDOW_PARAMS = {
+  blockW: 12, blockFloors: 2, floorH: 3.2, winW: 2.6, // 成片块：12m × 2 层（验收结构，不动）
+  ratios: { low: 0.65, mid: 0.40, high: 0.20 },       // 分层亮窗比（验收结构，不动）
+  // 色温分层（UE 材质实例式：每层一个固定色温，不做连续渐变，免得中层发脏）：
+  // 低层 <12m 商铺 2700K 暖黄 / 中层 12–60m 3500K 暖白 / 高层 >60m 6500K 冷白；
+  // 带边只在 10–14m / 56–64m 窄带过渡，每层内部是平色。
+  colors: { low: [1.0, 0.72, 0.32], mid: [1.0, 0.82, 0.52], high: [0.62, 0.82, 1.0] },
+  emissive: 1.35,    // 发光强度：1.1 → 1.35（ACES 下夜里成片亮，不爆；逐窗不加亮）
+  blockGain: 0.15,   // 逐块亮度抖动 ±15%（以 12m 亮暗块为单位，不以窗为单位，不噪点）
+};
+// DUSK：金色时刻。跟太阳高度角走，不跟时钟走；日落前后各一段，不是两档跳变。
+const DUSK = {
+  altHi: 12, altLo: -2,           // 金色时刻带：高度角 -2° … 12°
+  goldFog: 0xd88a5e,               // 雾金：取 app.js 18.5 档的雾色（单一来源是 app.js，此处只复述数值）
+  goldTint: 0xff9a4a,             // 地面 tint 金
+  hemiSkyGold: 0xffd9a0, hemiGroundGold: 0x8a6a52, // 半球光黄昏色
+  // 太阳色温/强度档（高度角 → 颜色/强度；25° 以上回归白天公式 0.25+2·sin(alt)）：
+  // -2° 夜色 / 0° 2200K / 3° 3000K / 6° 峰值 / 12° 收尾 / 25° 白天
+  stops: [
+    { alt: -2, color: 0x223355, intensity: 0.05 },
+    { alt: 0, color: 0xff7e3a, intensity: 0.55 },
+    { alt: 3, color: 0xff9a4a, intensity: 1.15 },
+    { alt: 6, color: 0xffb36a, intensity: 1.30 },
+    { alt: 12, color: 0xffc98a, intensity: 1.05 },
+    { alt: 25, color: 0xfff2d8, intensity: 0.25 + 2.0 * Math.sin(25 * D2R) },
+  ],
+};
+function sstep(a, b, x) { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
+// 金色时刻因子：带内 1，带外 0，边缘 smoothstep 过渡（纯函数，可 node 断言）
+export function duskFactor(alt) {
+  return sstep(DUSK.altLo, DUSK.altLo + 4, alt) * (1 - sstep(DUSK.altHi - 4, DUSK.altHi, alt));
+}
+function lerpHex(a, b, t) {
+  const r = Math.round(((a >> 16) & 255) + (((b >> 16) & 255) - ((a >> 16) & 255)) * t);
+  const g = Math.round(((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * t);
+  const bl = Math.round((a & 255) + ((b & 255) - (a & 255)) * t);
+  return (r << 16) | (g << 8) | bl;
+}
+// 太阳金色时刻：高度角 → {color, intensity, dusk}（纯函数，可 node 断言）
+export function goldenSun(alt) {
+  const dusk = duskFactor(alt);
+  if (alt <= DUSK.stops[0].alt) return { color: DUSK.stops[0].color, intensity: DUSK.stops[0].intensity, dusk: 0 };
+  if (alt >= 25) return { color: 0xfff2d8, intensity: 0.25 + 2.0 * Math.sin(alt * D2R), dusk: 0 };
+  for (let i = 0; i < DUSK.stops.length - 1; i++) {
+    const a = DUSK.stops[i], b = DUSK.stops[i + 1];
+    if (alt >= a.alt && alt <= b.alt) {
+      const t = (alt - a.alt) / (b.alt - a.alt);
+      return { color: lerpHex(a.color, b.color, t), intensity: a.intensity + (b.intensity - a.intensity) * t, dusk };
+    }
+  }
+  return { color: 0xfff2d8, intensity: 0.25 + 2.0 * Math.sin(alt * D2R), dusk };
+}
+// 纯函数/参数表出口（供 node 单元断言直接 import，不用起浏览器；浏览器里 api 也透出同一份）
+export { WINDOW_PARAMS, DUSK, sunPos, sunTimes, noonAlt };
 
 // ---------- 夜景灯光：亮窗 shader + 天光抬底 ----------
 const nightUniforms = { uNight: { value: 0 } }; // 全补丁共享一个 uniform，一次赋值全城生效
 let hemiLight = null;
+let hemiBaseSkyHex = null, hemiBaseGroundHex = null; // 半球光原色 hex（黄昏 tint 的还原基准，首次见光时抓）
 let nightLevel = 0;
 let nightPatchDone = false;
 let nightPatchedCount = 0;
@@ -82,8 +156,13 @@ const NIGHT_FRAG = `
   float h1 = fract(sin(dot(bcell, vec2(127.1, 311.7))) * 43758.5453);
   float ratio = wy < 12.0 ? 0.65 : (wy > 60.0 ? 0.20 : 0.40);
   float lit = step(h1, ratio);
-  vec3 winCol = mix(vec3(1.0, 0.78, 0.35), vec3(0.55, 0.90, 1.0), smoothstep(40.0, 90.0, wy));
-  totalEmissiveRadiance += winCol * win * lit * facade * uNight * 1.1;
+  // 色温分层（WINDOW_PARAMS.colors）：每层平色，窄带过渡，不连续渐变；
+  // 逐块亮度抖动 ±15%（第二个 hash，仍以 12m 亮暗块为单位，不以窗为单位）。
+  vec3 winCol = mix(vec3(1.0, 0.72, 0.32), vec3(1.0, 0.82, 0.52), smoothstep(10.0, 14.0, wy));
+  winCol = mix(winCol, vec3(0.62, 0.82, 1.0), smoothstep(56.0, 64.0, wy));
+  float h2 = fract(sin(dot(bcell + 7.3, vec2(269.5, 183.3))) * 43758.5453);
+  float blockGain = 0.85 + 0.30 * h2;
+  totalEmissiveRadiance += winCol * win * lit * facade * uNight * 1.35 * blockGain;
 }`;
 function nightOnBeforeCompile(shader) {
   shader.uniforms.uNight = nightUniforms.uNight;
@@ -217,12 +296,6 @@ function fmt(h) {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 // 日长取色：<11h 冷蓝 / 11–13h 金 / >13h 橙
-function dayColor(len) {
-  if (len < 11) return 0x3A6FD8;
-  if (len <= 13) return 0xFFD166;
-  return 0xFF9F1C;
-}
-
 function findLights() {
   sunLight = null; moonLight = null;
   ctx.scene.traverse((o) => {
@@ -244,67 +317,21 @@ function sunDir(alt, az) {
 }
 
 function buildOverlays() {
-  // 日轨弧线：按当天太阳轨迹画半圆弧（24 个点，6:00–18:00 真太阳时）
-  const pts = [];
-  for (let i = 0; i <= 24; i++) {
-    const solar = 6 + (i / 24) * 12;
-    const p = sunPosSolar(solar, PRESETS[S.preset].doy); // 弧线直接按真太阳时画
-    const d = sunDir(p.alt, p.az);
-    const R = 7500;
-    pts.push(new THREE.Vector3(d.x * R, Math.max(120, d.y * R), d.z * R));
-  }
-  const g = new THREE.BufferGeometry().setFromPoints(pts);
-  arcLine = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xFFD166, transparent: true, opacity: 0.9 }));
-  arcLine.name = 'd-sun-arc';
-  arcLine.frustumCulled = false;
-  ctx.scene.add(arcLine);
-
-  // 太阳圆盘：放在真太阳方向 8000m 处（相机 far=9000，能看见），跟随相机焦点
+  // 只留太阳圆盘（游戏里看得见的太阳）：放在真太阳方向 8000m 处（相机 far=9000，能看见），跟随相机焦点。
+  // 日轨弧线、地面 tint、地标圆点都是日照分析的工具，已拿掉（2026-11-26 老大令：游戏不要查看器功能）。
   sunDisc = new THREE.Mesh(
     new THREE.CircleGeometry(260, 32),
     new THREE.MeshBasicMaterial({ color: 0xFFE9A8, transparent: true, opacity: 0.95, fog: false }),
   );
   sunDisc.name = 'd-sun-disc';
+  sunDisc.visible = false;
   ctx.scene.add(sunDisc);
-
-  // 日照时长着色层：地面大平面，按当日日长取色（半透明，不改楼身）
-  tintPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(34000, 36000),
-    new THREE.MeshBasicMaterial({ color: 0xFFD166, transparent: true, opacity: 0.16, depthWrite: false }),
-  );
-  tintPlane.rotation.x = -Math.PI / 2;
-  tintPlane.position.y = 4;
-  tintPlane.name = 'd-sun-tint';
-  ctx.scene.add(tintPlane);
-
-  // 每个地标一个点：颜色按该地标的日出时刻（经度差，分钟级）微调
-  const lms = (ctx.sixIndex && ctx.sixIndex.landmarks) || (ctx.DATA && ctx.DATA.landmarks) || [];
-  for (const lm of lms) {
-    const dot = new THREE.Mesh(
-      new THREE.CircleGeometry(60, 20),
-      new THREE.MeshBasicMaterial({ color: 0xFFD166, transparent: true, opacity: 0.85, depthWrite: false }),
-    );
-    dot.rotation.x = -Math.PI / 2;
-    dot.position.set(lm.x, 6, lm.z);
-    dot.name = 'd-sun-lm';
-    dot.userData.lon = LON + (lm.x / 95753.45); // 经度≈中心经度 + x/每度米数（只用于日出时刻微调）
-    ctx.scene.add(dot);
-    lmDots.push(dot);
-  }
-  setOverlaysVisible(false);
-}
-function setOverlaysVisible(v) {
-  if (arcLine) arcLine.visible = v && S.display !== 'white';
-  if (sunDisc) sunDisc.visible = v && S.display !== 'white';
-  if (tintPlane) tintPlane.visible = v && S.display !== 'white';
-  for (const d of lmDots) d.visible = v && S.display !== 'white';
 }
 
 function tick(t) {
   raf = requestAnimationFrame(tick);
-  // 夜景灯光跟时间走：日照面板开没开都生效（settings 夜景开关只改时间轴）
+  // 太阳跟时间轴走：不用开任何面板（日照分析面板已拿掉，太阳定位不再挂在面板开关上）
   applyNightLevel(readNight());
-  if (!S.on) return;
   const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
   lastT = t;
   void dt;
@@ -314,12 +341,27 @@ function tick(t) {
   const doy = PRESETS[S.preset].doy;
   const p = sunPos(hour, doy);
   const d = sunDir(p.alt, p.az);
+  const g = goldenSun(p.alt); // 金色时刻：太阳色/强度/黄昏因子一次算好，灯/盘/tint/半球光共用
   // 太阳方向光按真太阳位置摆；落山后强度归零（夜景归 app.js 的月光管）
-  // 强度口径（threejs-materials-lighting：主光 2–3）：正午约 2.25，低角度递减
+  // 强度口径（threejs-materials-lighting：主光 2–3）：正午约 2.25，低角度按
+  // goldenSun 档走——6° 峰值 1.30（app.js 黄昏档 1.1–1.2 的同量级），25° 以上
+  // 回归 0.25+2·sin(alt)；颜色按色温档走，不再是 alt<12 二档跳变。
   if (sunLight) {
     sunLight.position.set(d.x * 1200, Math.max(60, d.y * 1400), d.z * 1200);
-    sunLight.intensity = p.alt > 0 ? 0.25 + 2.0 * Math.sin(p.alt * D2R) : 0.05;
-    sunLight.color.setHex(p.alt > 0 ? (p.alt < 12 ? 0xFFB36A : 0xFFF2D8) : 0x223355);
+    sunLight.intensity = g.intensity;
+    sunLight.color.setHex(g.color);
+  }
+  // 半球光黄昏 tint（只改颜色，不改强度——强度归 app.js applyTime 管）：
+  // 黄昏因子 >0 时向暖金偏，=0 时精确还原原色。
+  if (hemiLight) {
+    if (hemiBaseSkyHex === null) { hemiBaseSkyHex = hemiLight.color.getHex(); hemiBaseGroundHex = hemiLight.groundColor.getHex(); }
+    if (g.dusk > 0) {
+      hemiLight.color.setHex(lerpHex(hemiBaseSkyHex, DUSK.hemiSkyGold, g.dusk * 0.6));
+      hemiLight.groundColor.setHex(lerpHex(hemiBaseGroundHex, DUSK.hemiGroundGold, g.dusk * 0.6));
+    } else {
+      hemiLight.color.setHex(hemiBaseSkyHex);
+      hemiLight.groundColor.setHex(hemiBaseGroundHex);
+    }
   }
   // 太阳圆盘跟随视点焦点
   if (sunDisc) {
@@ -328,20 +370,10 @@ function tick(t) {
     const fz = st && st.mode === 'aerial' && st.target ? st.target.z : (st && st.pos ? st.pos.z : 0);
     sunDisc.position.set(fx + d.x * 8000, Math.max(300, d.y * 8000), fz + d.z * 8000);
     sunDisc.lookAt(ctx.camera.position);
+    sunDisc.material.color.setHex(g.color);
+    sunDisc.material.opacity = p.alt > -2 ? (g.dusk > 0 ? 1.0 : 0.95) : 0;
     sunDisc.visible = p.alt > -2 && S.display !== 'white';
   }
-  if (tintPlane) tintPlane.material.color.setHex(dayColor(dayLength(doy)));
-  updateReadout(p);
-}
-
-let readoutEl = null;
-function updateReadout(p) {
-  if (!readoutEl) return;
-  const st = sunTimes(PRESETS[S.preset].doy);
-  readoutEl.innerHTML =
-    `太阳高度 <b>${p.alt.toFixed(1)}°</b> · 方位 <b>${p.az.toFixed(0)}°</b>（${p.az < 180 ? '东' : '西'}）<br>` +
-    `真太阳时 <b>${fmt(p.solarTime)}</b> · 时钟 <b>${fmt(S.hour)}</b> · 正午高度 <b>${noonAlt(PRESETS[S.preset].doy).toFixed(1)}°</b><br>` +
-    `日出 <b>${fmt(st.sunrise)}</b> · 日落 <b>${fmt(st.sunset)}</b> · 日长 <b>${st.length.toFixed(1)} 小时</b>`;
 }
 
 export function init(c) {
@@ -351,48 +383,26 @@ export function init(c) {
   findLights();
   buildOverlays();
 
-  // 日照按钮：挂进现有 #toggles（运行时 DOM，不改 index.html）
-  const toggles = $('#toggles');
-  if (toggles && !$('#d-sun-btn')) {
-    sunBtn = document.createElement('button');
-    sunBtn.className = 'tgl'; sunBtn.id = 'd-sun-btn'; sunBtn.setAttribute('aria-pressed', 'false');
-    sunBtn.textContent = '日照';
-    sunBtn.addEventListener('click', () => setOn(!S.on));
-    toggles.appendChild(sunBtn);
-  }
-
-  panel = document.createElement('aside');
-  panel.id = 'd-sun';
-  panel.className = 'd-panel';
-  panel.style.display = 'none'; // 首次打开不自动弹
-  panel.innerHTML = `<h2>日照分析 <button id="d-sun-close" aria-label="收起日照">✕</button></h2>
-    <div class="sub">纬度 30.66° · 真太阳时 · 经度 104.06°E<br>时间轴就是时钟时间，太阳跟着真太阳转</div>
-    <div class="d-route-btns" id="d-sun-presets"></div>
-    <div class="sub" id="d-sun-readout" style="margin-top:6px;line-height:1.9"></div>
-    <div class="sub" style="margin-top:6px">着色：地面 tint 按当日日长取色（&lt;11h 冷蓝 / 11–13h 金 / &gt;13h 橙）；<br>地标圆点按各点日出时刻（经度差，分钟级）微调。<br>逐栋遮挡阴影本轮不做（六区共享材质下无真遮挡）。</div>`;
-  const pb = panel.querySelector('#d-sun-presets');
-  for (const [key, pr] of Object.entries(PRESETS)) {
-    const b = document.createElement('button');
-    b.textContent = pr.label; b.dataset.preset = key;
-    if (key === S.preset) b.classList.add('active');
-    b.addEventListener('click', () => setPreset(key));
-    pb.appendChild(b);
-  }
-  readoutEl = panel.querySelector('#d-sun-readout');
-  panel.querySelector('#d-sun-close').addEventListener('click', () => setOn(false));
-  document.body.appendChild(panel);
-
   if (!raf) { lastT = performance.now(); raf = requestAnimationFrame(tick); }
 
   const api = {
-    setOn, setPreset, sunPos, sunPosSolar, noonAlt, presetTable, sunTimes, dayLength,
-    setNight, patchMaterial,
+    sunPos, sunPosSolar, noonAlt, presetTable, sunTimes, dayLength,
+    setNight, patchMaterial, goldenSun, duskFactor,
+    windowParams: () => JSON.parse(JSON.stringify(WINDOW_PARAMS)),
+    duskParams: () => ({ altHi: DUSK.altHi, altLo: DUSK.altLo, goldFog: DUSK.goldFog, goldTint: DUSK.goldTint }),
+    // 黄昏快照（weather.js 只读这个，不自己算太阳；单一来源）
+    dusk: () => {
+      const p = sunPos(S.hour, PRESETS[S.preset].doy);
+      const gg = goldenSun(p.alt);
+      const st = sunTimes(PRESETS[S.preset].doy);
+      return { alt: +p.alt.toFixed(1), factor: +gg.dusk.toFixed(2), color: gg.color, intensity: +gg.intensity.toFixed(2), sunset: +st.sunset.toFixed(2), sunrise: +st.sunrise.toFixed(2) };
+    },
     get nightLevel() { return nightLevel; },
     materials: () => [...nightPatchedMats],
-    stats: () => ({ night: nightLevel, patched: nightPatchedCount, hemi: hemiLight ? +hemiLight.intensity.toFixed(2) : null }),
+    stats: () => ({ night: nightLevel, patched: nightPatchedCount, hemi: hemiLight ? +hemiLight.intensity.toFixed(2) : null, windowEmissive: WINDOW_PARAMS.emissive, dusk: api.dusk() }),
     get state() {
       const st = sunTimes(PRESETS[S.preset].doy);
-      return { on: S.on, preset: S.preset, lat: LAT, lon: LON, hour: S.hour, noonAlt: +noonAlt(PRESETS[S.preset].doy).toFixed(1), presets: presetTable(), ...st };
+      return { preset: S.preset, lat: LAT, lon: LON, hour: S.hour, noonAlt: +noonAlt(PRESETS[S.preset].doy).toFixed(1), presets: presetTable(), ...st };
     },
   };
   window.__dSun = api;
@@ -405,43 +415,8 @@ export function init(c) {
   return api;
 }
 
-function setPreset(key) {
-  if (!PRESETS[key]) return;
-  S.preset = key;
-  const pb = panel && panel.querySelector('#d-sun-presets');
-  if (pb) pb.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.preset === key));
-  // 换档后重画日轨弧线
-  if (arcLine) {
-    const pts = [];
-    for (let i = 0; i <= 24; i++) {
-      const p = sunPosSolar(6 + (i / 24) * 12, PRESETS[key].doy);
-      const d = sunDir(p.alt, p.az);
-      pts.push(new THREE.Vector3(d.x * 7500, Math.max(120, d.y * 7500), d.z * 7500));
-    }
-    arcLine.geometry.dispose();
-    arcLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
-  }
-  updateReadout(sunPos(S.hour, PRESETS[key].doy));
-}
-
-function setOn(on) {
-  S.on = !!on;
-  setOverlaysVisible(S.on);
-  if (panel) panel.style.display = S.on ? 'block' : 'none';
-  if (sunBtn) { sunBtn.setAttribute('aria-pressed', String(S.on)); sunBtn.classList.toggle('active', S.on); }
-  if (S.on) {
-    updateReadout(sunPos(S.hour, PRESETS[S.preset].doy));
-  } else {
-    // 恢复：让 app.js 的 applyTime 重新接管（触发一次滑块 input）
-    const slider = $('#time-slider');
-    if (slider) slider.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  return S.on;
-}
-
 export function setDisplay(mode) {
   S.display = mode;
-  setOverlaysVisible(S.on);
   document.body.classList.toggle('d-white', mode === 'white');
   applyNightLevel(readNight()); // 白膜/热力模式下亮窗归零
 }

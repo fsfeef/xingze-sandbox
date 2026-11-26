@@ -3,14 +3,14 @@
   "name": "星泽市 · 六区白模",
   "version": "six-districts-1.0",
   "generated": "2026-11-26",
-  "source": "white-model-six-districts/manifest.json (six-districts-1.0, 2026-11-25 17:52)",
+  "source": "white-model-six-districts/manifest.json (six-districts-1.0, 2026-11-25 17:52)；counts 于 2026-11-26 底子修后同步自 manifest；counts/districts 于 2026-11-26 重叠样板后同步自 generation-log.json + kept 集（形心归区，文件顺序首匹配；1 栋区界楼 fp 2aefd0438cc74031 未归入任一区，60,645 已归区 + 1 = 60,646）",
   "note": "六区白模裁剪包接进沙盘；程序化小城 city.json 已停用，仅作加载失败时的 fallback"
  },
  "counts": {
   "chunks": 2222,
   "rows": 71,
-  "buildings": 60601,
-  "road_segs": 130624,
+  "buildings": 60628,
+  "road_segs": 129715,
   "bridge_segs": 2552,
   "railway_segs": 17157,
   "compounds": 2613,
@@ -22,10 +22,10 @@
   "water_islands": 43,
   "flowers": 6,
   "landmarks": 25,
-  "elevated_segs": 19421,
-  "ramp_segs": 11256,
-  "deck_segs": 19421,
-  "piers": 18144,
+  "elevated_segs": 19373,
+  "ramp_segs": 11210,
+  "deck_segs": 19373,
+  "piers": 18149,
   "toll_booths": 36,
   "toll_plazas": 8,
   "landuse_polys": 11117,
@@ -36,180 +36,187 @@
   "lamps_tunnel": 2036,
   "trees": 13674,
   "greenway_segs": 1363,
-  "road_ribbons": 87238,
+  "road_ribbons": 86477,
   "runway_segs": 0,
   "aprons": 0,
   "special_lines": 120,
   "special_tris": 1,
   "vpiers": 6,
   "mt_pois": 18,
-  "tris_high": 1528804,
-  "tris_mid": 680393,
-  "terrain_tiles": 169,
+  "tris_high": 1554500,
+  "tris_mid": 692564,
+  "terrain_tiles": 2300,
   "far_terrain_tiles": 1909,
-  "fabric_cells": 7569
+  "fabric_cells": 7569,
+  "lines_high": 395374,
+  "lines_mid": 76246,
+  "rivers": 9531,
+  "water": 794,
+  "tunnels": 957,
+  "tunnel_portals": 369,
+  "river_rails": 21986
  },
  "landmarks": [
   {
-   "name": "人民公园",
+   "name": "望星公园",
    "x": -1042.8,
    "z": -344.9,
    "height_m": null
   },
   {
-   "name": "春熙路",
+   "name": "星熙路",
    "x": 1155.7,
    "z": -994.9,
    "height_m": null
   },
   {
-   "name": "武侯祠",
+   "name": "凌霄祠",
    "x": -1659.4,
    "z": -1999.7,
    "height_m": null
   },
   {
-   "name": "锦城湖",
+   "name": "云锦湖",
    "x": -2142.0,
    "z": -10526.7,
    "height_m": null
   },
   {
-   "name": "杜甫草堂",
+   "name": "听涛草堂",
    "x": -3884.7,
    "z": -334.9,
    "height_m": null
   },
   {
-   "name": "宽窄巷子",
+   "name": "青石双巷",
    "x": -1636.4,
    "z": 300.7,
    "height_m": null
   },
   {
-   "name": "文殊院",
+   "name": "云林禅院",
    "x": 17.2,
    "z": 1047.9,
    "height_m": null
   },
   {
-   "name": "熊猫基地",
+   "name": "云竹熊猫苑",
    "x": 7415.1,
    "z": 7692.5,
    "height_m": null
   },
   {
-   "name": "永陵",
+   "name": "青石陵",
    "x": -1962.9,
    "z": 1224.8,
    "height_m": null
   },
   {
-   "name": "成都东站",
+   "name": "星泽东站",
    "x": 7137.5,
    "z": -3752.8,
    "height_m": null
   },
   {
-   "name": "青羊宫",
+   "name": "紫气宫",
    "x": -2555.7,
    "z": -213.3,
    "height_m": null
   },
   {
-   "name": "安顺桥",
+   "name": "霓虹桥",
    "x": 1764.7,
    "z": -2305.9,
    "height_m": null
   },
   {
-   "name": "东郊记忆",
+   "name": "铁光记忆园",
    "x": 5870.6,
    "z": 651.1,
    "height_m": null
   },
   {
-   "name": "天府广场",
+   "name": "星泽广场",
    "x": -114.9,
    "z": -570.4,
    "height_m": null
   },
   {
-   "name": "环球中心",
+   "name": "星环中心",
    "x": -183.8,
    "z": -10339.9,
    "height_m": null
   },
   {
-   "name": "天府艺术公园",
+   "name": "星泽艺术公园",
    "x": -4550.2,
    "z": 5108.1,
    "height_m": null
   },
   {
-   "name": "太古里",
+   "name": "星光里",
    "x": 1390.3,
    "z": -963.9,
    "height_m": null
   },
   {
-   "name": "339电视塔",
+   "name": "揽星塔",
    "x": 2492.5,
    "z": -179.1,
    "height_m": 339
   },
   {
-   "name": "府河",
+   "name": "星河",
    "x": -1438.2,
    "z": 5102.5,
    "height_m": null
   },
   {
-   "name": "琴台路",
+   "name": "琴韵路",
    "x": -2089.3,
    "z": -294.0,
    "height_m": null
   },
   {
-   "name": "九眼桥",
+   "name": "九虹桥",
    "x": 2042.4,
    "z": -2501.5,
    "height_m": null
   },
   {
-   "name": "望江楼",
+   "name": "望星楼",
    "x": 2388.1,
    "z": -3676.6,
    "height_m": null
   },
   {
-   "name": "锦江",
+   "name": "星江",
    "x": 1241.0,
    "z": -9948.6,
    "height_m": null
   },
   {
-   "name": "交子大道双子塔",
+   "name": "双星塔",
    "x": -262.4,
    "z": -8868.6,
    "height_m": 218
   },
   {
-   "name": "锦里",
+   "name": "灯影里",
    "x": -1707.3,
    "z": -1808.4,
    "height_m": null
   }
  ],
  "landmarks_excluded": [
-  "麓湖",
-  "兴隆湖",
-  "东安湖"
+  "云麓湖",
+  "星隆湖",
+  "星安湖"
  ],
  "districts": [
   {
-   "name": "武侯区",
-   "buildings": 18028,
+   "name": "云武区",
+   "buildings": 18058,
    "center": [
     -3969.0,
     -6394.3
@@ -217,8 +224,8 @@
    "area_km2": 126.1
   },
   {
-   "name": "金牛区",
-   "buildings": 10068,
+   "name": "金泽区",
+   "buildings": 10069,
    "center": [
     -1058.1,
     7435.3
@@ -226,8 +233,8 @@
    "area_km2": 107.1
   },
   {
-   "name": "锦江区",
-   "buildings": 9885,
+   "name": "星江区",
+   "buildings": 9888,
    "center": [
     4553.7,
     -6764.0
@@ -235,8 +242,8 @@
    "area_km2": 60.2
   },
   {
-   "name": "成华区",
-   "buildings": 12009,
+   "name": "华兴区",
+   "buildings": 12016,
    "center": [
     7313.3,
     2880.3
@@ -244,8 +251,8 @@
    "area_km2": 108.4
   },
   {
-   "name": "青羊区",
-   "buildings": 8288,
+   "name": "青云区",
+   "buildings": 8292,
    "center": [
     -8192.0,
     1891.5
@@ -253,8 +260,8 @@
    "area_km2": 66.2
   },
   {
-   "name": "高新南区",
-   "buildings": 2321,
+   "name": "泽新南区",
+   "buildings": 2322,
    "center": [
     180.0,
     -11640.8
@@ -273,9 +280,9 @@
  },
  "gaps": {
   "entrances_est": "446 个地铁估算口：方法=推算，未做百度核对；沙盘里如显示，一律标“推算”",
-  "lakes": "湖文件只有 9 个不是 11 个，缺 2 个未补",
+  "lakes": "六区内 5 个湖（北湖、锦城湖、白鹭湾×2、升仙湖）已全部在底子里；11 个湖是全城口径；青龙湖 rel 10660802 几何损坏，需 PBF 重拼",
   "chunk_98_93": "98_93 为空块（0 栋 0 路，bytes=0），磁盘无文件；加载器跳过，不报错",
-  "mid_missing": "97 块无 mid 文件，远处用 high 档代替",
-  "crop_stats": "crop-stats.json 是裁前估算（约数 KX=95726、形心判定）：kept 60,599 栋 / 2,253 块；与 manifest（60,601 栋 / 2,222 块）差 2 栋 / 31 块；一切以 manifest + chunks/index.json 为准"
+  "mid_missing": "86 块无 mid 文件（含 98_93 空块），其中 85 个非空块 tris_mid/bytes_mid 为 0，属设计无文件，远处用 high 档代替",
+  "crop_stats": "crop-stats.json 是裁前估算（约数 KX=95726、形心判定）：kept 60,599 栋 / 2,253 块；与 manifest（60,647 栋 / 2,222 块）差 48 栋 / 31 块；一切以 manifest + chunks/index.json 为准"
  }
 }

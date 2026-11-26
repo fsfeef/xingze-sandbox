@@ -224,7 +224,7 @@ export function init(c) {
   const foot = document.createElement('div');
   foot.className = 'sub';
   foot.style.marginTop = '8px';
-  foot.innerHTML = `互斥：白天↔夜景二选一；雨/雪可叠夜景，也可互叠；白膜开时亮窗·雨雪·雪顶归零，关白膜恢复。<br>设置面板打开时帮助栏收起，点“?”开帮助时面板先收起。<br>日照分析：点右上“日照”按钮开（app/sun.js，纬度 30.66° 真太阳时）。<br>白天霓虹亮度降 40% 但不断，全程亮闪闪。`;
+  foot.innerHTML = `互斥：白天↔夜景二选一；雨/雪可叠夜景，也可互叠；白膜开时亮窗·雨雪·雪顶归零，关白膜恢复。<br>设置面板打开时帮助栏收起，点“?”开帮助时面板先收起。<br>白天霓虹亮度降 40% 但不断，全程亮闪闪。`;
   panel.appendChild(foot);
   panel.querySelector('#d-settings-close').addEventListener('click', () => closeSettings());
   document.body.appendChild(panel);

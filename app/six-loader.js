@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const PKG = '../white-model-six-districts';
 const CHUNK = 500, OX = -60000, OZ = -51000;
@@ -20,6 +21,38 @@ const TERRAIN_R = 6000;   // 城区地形瓦片半径
 const FAR_MAX = 96;       // 远山瓦片上限（按距离取最近）
 const FAR_R = 120000;
 const MAX_CONCURRENT = 6;
+
+// ---------- 城边外圈粗坯（2026-11-26 16:28 令：城边收不住，边界外是白板） ----------
+// 沿六区边界（district-polygons.json 的六区多边形，只取几何、不取名字、不编新地名）
+// 外圈加一圈低矮粗坯体量，示意城外延续；远山 96 块（terrain/far，已有）做背景收住。
+// 做法：500m 格取带内格点，格点在区外且离边界 ≤2600m 即落块；全部块并成 1 个 mesh（+1 draw call）。
+// 块底沉到 y=-5（低于地面兜底面 -2.5 与地形起伏，不挑地形高程、不打架）；
+// 颜色只用 fabric 陶土色 #f2f0ea 系的低灰（顶点色，5 档微差）；白膜先行、不做精细、不贴图。
+const POLY_URL = '../district-polygons.json';
+// 经纬度 → 世界坐标，与总览图管线同一口径（overlay_districts.py / render_six_overview.py）
+const LON0 = 104.065, LAT0 = 30.665, KX = 95726, KZ = 110540;
+const RING_CELL = 500;    // 粗坯格
+const RING_BAND = 2600;   // 外圈带宽（边界外 2600m 内）
+const RING_BASE_Y = -5;   // 块底（沉到地面兜底面之下）
+const RING_COLORS = [0xf2f0ea, 0xeae6dc, 0xe2dcd0, 0xefe9dc, 0xddd6c8]; // #f2f0ea 系低灰
+
+// 确定性哈希（格点 + 盐 → [0,1)）：同一格每次算出来一样，不随加载变
+function _ringHash(ix, iz, salt) {
+  const s = Math.sin(ix * 127.1 + iz * 311.7 + salt * 74.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+// 偶奇规则点在多边形内（某区全部环一起算：多部件、多边形洞都对）
+function _pointInDistrict(x, z, rings) {
+  let inside = false;
+  for (const ring of rings) {
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], zi = ring[i][1], xj = ring[j][0], zj = ring[j][1];
+      if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) inside = !inside;
+    }
+  }
+  return inside;
+}
 
 // 释放 GLB 自带材质（共享材质不释放；兼容多材质数组）
 function disposeMaterial(mat, keep = []) {
@@ -68,12 +101,16 @@ export class SixLoader {
     this.terrain = new Map();     // key -> mesh
     this.far = new Map();         // key -> mesh
     this.fabric = null;
+    this.outerRing = null;        // {mesh, cells, blocks, tris}：城边外圈粗坯（1 个 mesh）
+    this._ringBuilt = false;      // 已建好（含建失败：失败也置 true，不反复重试刷请求）
+    this._ringBuilding = false;   // 正在建（loadInitial 与 update 后备只触发一次）
     this.display = 'normal';
     this.buildingMeshes = new Set(); // 参与热力/白膜切换的三角网格（分块 + fabric）
     this.stats = {
       chunksHigh: 0, chunksMid: 0, chunksLoaded: 0, chunksFailed: 0,
       terrainTiles: 0, farTiles: 0, fabricLoaded: false,
       filesLoaded: 0, filesFailed: 0,
+      outerRing: { ready: false, cells: 0, blocks: 0, tris: 0, drawCalls: 0, reason: 'not-built' },
     };
     this._tmpV = new THREE.Vector3();
     this._raycaster = new THREE.Raycaster();
@@ -113,6 +150,8 @@ export class SixLoader {
     });
     this.matFabricHeat.onBeforeCompile = this.matHeat.onBeforeCompile;
     this.matTerrain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
+    // 白膜下地形也用陶土色（2026-11-26 17:06 令：颜色全撤；否则白膜里地面一直是绿的）
+    this.matTerrainClay = new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 1, metalness: 0 });
 
     // 地形组（供地面高度射线查询）
     this.terrainGroup = new THREE.Group();
@@ -124,12 +163,20 @@ export class SixLoader {
     this.fabricGroup = new THREE.Group();
     this.fabricGroup.name = 'six-fabric';
     scene.add(this.fabricGroup);
+    this.outerRingGroup = new THREE.Group();
+    this.outerRingGroup.name = 'six-outer-ring';
+    scene.add(this.outerRingGroup);
   }
 
   _log(msg) { if (this.onLog) this.onLog(msg); else console.log('[six]', msg); }
 
   _triMat() {
     return this.display === 'heat' ? this.matHeat : this.display === 'white' ? this.matClay : this.matNormal;
+  }
+
+  // 地形材质：白膜下陶土色，其余用顶点色
+  _terrainMat() {
+    return this.display === 'white' ? this.matTerrainClay : this.matTerrain;
   }
 
   // 带重试的取 JSON：一次抖动不该让整站起不来（以前 loadCatalog 任一失败就抛，app 直接报初始化失败）
@@ -174,6 +221,132 @@ export class SixLoader {
     this.terrainIndex = ti.terrain || {};
     this.farIndex = fi.terrain_far || {};
     this._log(`catalog: rows=${this.rows.length} terrain=${Object.keys(this.terrainIndex).length} far=${Object.keys(this.farIndex).length}`);
+  }
+
+  // ---------- 城边外圈粗坯（只建一次；多边形取不到也不阻断启动） ----------
+  async _ensureOuterRing() {
+    if (this._ringBuilt || this._ringBuilding) return;
+    this._ringBuilding = true;
+    try {
+      // 多边形文件不在六区包里（在沙盘根目录），失败只记日志、环跳过，不抛给 init：
+      // 线上若没部署该文件，城边只是没环，不能因此整站起不来
+      const data = await this._fetchJSON(POLY_URL);
+      this._buildOuterRing(data);
+    } catch (e) {
+      // _buildOuterRing 自己的失败（no-polygons / no-cells / merge-failed）已在里面写了 reason；
+      // 这里只兜未预料的 throw，不覆盖已写的 reason
+      if (!this.stats.outerRing.ready && this.stats.outerRing.reason === 'not-built') {
+        this.stats.outerRing.reason = 'build-failed';
+      }
+      console.error('[six] outer ring skipped', e);
+    } finally {
+      this._ringBuilt = true;
+      this._ringBuilding = false;
+    }
+  }
+
+  _buildOuterRing(data) {
+    // 只取几何（Object.values，不读区名）：六区多边形 → 世界坐标环
+    const districts = [];
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const polys of Object.values(data || {})) {
+      const rings = [];
+      for (const ring of polys || []) {
+        if (!Array.isArray(ring) || ring.length < 3) continue;
+        const pts = ring.map(([lon, lat]) => {
+          const x = (lon - LON0) * KX, z = (lat - LAT0) * KZ;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+          return [x, z];
+        });
+        rings.push(pts);
+      }
+      if (rings.length) districts.push(rings);
+    }
+    if (!districts.length || !isFinite(minX)) {
+      this.stats.outerRing.reason = 'no-polygons';
+      console.error('[six] outer ring skipped: no district polygons');
+      return;
+    }
+    // 边界采样点（沿边每 ~150m 一个）：格点到边界的距离只跟采样点算，又快又够粗坯用
+    const samples = [];
+    for (const rings of districts) {
+      for (const ring of rings) {
+        for (let i = 0; i < ring.length; i++) {
+          const [x1, z1] = ring[i], [x2, z2] = ring[(i + 1) % ring.length];
+          const len = Math.hypot(x2 - x1, z2 - z1);
+          const steps = Math.max(1, Math.floor(len / 150));
+          for (let k = 0; k < steps; k++) {
+            samples.push([x1 + (x2 - x1) * (k / steps), z1 + (z2 - z1) * (k / steps)]);
+          }
+        }
+      }
+    }
+    // 500m 格扫外圈带：区外、离边界 ≤2600m 的格落块（靠边界密、向外稀、向外矮）
+    const geos = [];
+    let cells = 0, blocks = 0;
+    const x0 = Math.floor((minX - RING_BAND) / RING_CELL) * RING_CELL;
+    const z0 = Math.floor((minZ - RING_BAND) / RING_CELL) * RING_CELL;
+    const x1 = Math.ceil((maxX + RING_BAND) / RING_CELL) * RING_CELL;
+    const z1 = Math.ceil((maxZ + RING_BAND) / RING_CELL) * RING_CELL;
+    const col = new THREE.Color();
+    for (let gx = x0; gx < x1; gx += RING_CELL) {
+      for (let gz = z0; gz < z1; gz += RING_CELL) {
+        const cx = gx + RING_CELL / 2, cz = gz + RING_CELL / 2;
+        let inside = false;
+        for (const rings of districts) {
+          if (_pointInDistrict(cx, cz, rings)) { inside = true; break; }
+        }
+        if (inside) continue;
+        let dMin = Infinity;
+        for (let s = 0; s < samples.length; s++) {
+          const dx = samples[s][0] - cx, dz = samples[s][1] - cz;
+          const d2 = dx * dx + dz * dz;
+          if (d2 < dMin * dMin) dMin = Math.sqrt(d2);
+        }
+        if (dMin > RING_BAND) continue;
+        cells++;
+        const ix = Math.round(gx / RING_CELL), iz = Math.round(gz / RING_CELL);
+        const t = dMin / RING_BAND; // 0 靠边界 → 1 带外缘
+        if (_ringHash(ix, iz, 1) > 0.78 - 0.45 * t) continue; // 向外渐稀
+        const w = 230 + 190 * _ringHash(ix, iz, 2);
+        const h = (12 + 16 * _ringHash(ix, iz, 3)) * (1.15 - 0.55 * t);
+        const jx = ( _ringHash(ix, iz, 4) - 0.5) * 120;
+        const jz = (_ringHash(ix, iz, 5) - 0.5) * 120;
+        const g = new THREE.BoxGeometry(w, h, w);
+        g.translate(cx + jx, RING_BASE_Y + h / 2, cz + jz);
+        col.setHex(RING_COLORS[Math.floor(_ringHash(ix, iz, 6) * RING_COLORS.length) % RING_COLORS.length]);
+        const n = g.attributes.position.count;
+        const colors = new Float32Array(n * 3);
+        for (let v = 0; v < n; v++) { colors[v * 3] = col.r; colors[v * 3 + 1] = col.g; colors[v * 3 + 2] = col.b; }
+        g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geos.push(g);
+        blocks++;
+      }
+    }
+    if (!geos.length) {
+      this.stats.outerRing = { ready: false, cells, blocks: 0, tris: 0, drawCalls: 0, reason: 'no-cells' };
+      console.error('[six] outer ring skipped: no cells in band');
+      return;
+    }
+    const merged = mergeGeometries(geos, false);
+    for (const g of geos) g.dispose();
+    if (!merged) {
+      this.stats.outerRing.reason = 'merge-failed';
+      console.error('[six] outer ring skipped: mergeGeometries failed');
+      return;
+    }
+    const mesh = new THREE.Mesh(merged, this._triMat());
+    mesh.name = 'six-outer-ring-blocks';
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrix();
+    mesh.frustumCulled = true;
+    this.outerRingGroup.add(mesh);
+    this.buildingMeshes.add(mesh); // 显示切换（常态/热力/白膜）与分块、fabric 走同一套共享材质
+    const tris = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3;
+    this.outerRing = { mesh, cells, blocks, tris };
+    this.stats.outerRing = { ready: true, cells, blocks, tris: Math.round(tris), drawCalls: 1, reason: '' };
+    this._log(`outer ring: cells=${cells} blocks=${blocks} tris=${Math.round(tris)} drawCalls=+1`);
   }
 
   async _shard(cz) {
@@ -334,6 +507,8 @@ export class SixLoader {
   async _refresh(view) {
     const now = performance.now();
     const { tx, tz, camX, camY, camZ, mode, aerialDist } = view;
+    // 外圈粗坯后备：loadInitial 没走到的入口也补建一次（只触发一次，失败不重试刷请求）
+    if (!this._ringBuilt && this.rows) this._ensureOuterRing();
     // 视角跳变（传送/小地图飞/地标飞 >500m）：旧加载队列作废——以前跳过去后还按 6 并发慢慢下旧地方的包，
     // 新地方的块排在后面，十几秒出不来，统计还停在旧地方（看着像“加载不出来”）
     if (Math.hypot(tx - this._viewPos.x, tz - this._viewPos.z) > 500) {
@@ -559,6 +734,8 @@ export class SixLoader {
     })();
     const shardMapsP = this._rowsFor(view.tz, MID_R + UNLOAD_PAD);
     const [shardMaps] = await Promise.all([shardMapsP, fabricP]);
+    // 城边外圈粗坯：目录 + fabric 到位后建（多边形取不到也不阻断首屏，见 _ensureOuterRing）
+    await this._ensureOuterRing();
     // 首批只等 high 档（近处）；mid 环由 update() 流式补，不阻塞首屏
     const jobs = [];
     for (const sm of shardMaps) {
@@ -612,6 +789,10 @@ export class SixLoader {
       this.fabricMesh.material = mode === 'heat' ? this.matFabricHeat
         : mode === 'white' ? this.matFabricClay : this.matFabric;
     }
+    // 地形/远山：白膜下也换陶土色（否则地面一直是绿的）
+    const tm = this._terrainMat();
+    for (const m of this.terrain.values()) m.material = tm;
+    for (const m of this.far.values()) m.material = tm;
   }
 
   // ---------- 地面高度（走路/开车用，节流缓存） ----------
