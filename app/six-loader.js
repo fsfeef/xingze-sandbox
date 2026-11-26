@@ -50,7 +50,16 @@ export class SixLoader {
     this.loader = new GLTFLoader(this.manager);
     // 远山瓦片是 gltfpack 压过的 meshopt（EXT_meshopt_compression），必须配解码器，否则 96 片全失败
     this.loader.setMeshoptDecoder(MeshoptDecoder);
-    this._failedTiles = new Map(); // 地形/远山失败瓦片：30s 内不重试，防失败风暴拖垮帧率
+    this._failedTiles = new Map(); // 地形/远山失败瓦片：key -> 下次可重试时间戳（退避重试，不是 30s 死等）
+    this._tileFails = new Map();   // 瓦片连续失败次数（退避倍数）
+    this._failedChunks = new Set(); // 当前仍缺失某档的分块 key（补上即删；验收读 failedLive，不读累计数）
+    this._failedShards = new Map(); // 行 shard 失败：cz -> 下次可重试时间戳（失败不缓存空结果）
+    this._shardFails = new Map();  // 行 shard 连续失败次数
+    this._terrainLoading = new Set(); // 加载中瓦片（单独记，不进 terrain/far Map；卸载循环看不见它）
+    this._farLoading = new Set();
+    this._unloadGraceMs = 2000;   // 出界后 2s 内不卸载：滑动时块不掉、不闪没
+    this._viewGen = 0;             // 视角代次：目标跳变（传送/飞过去）就 +1，旧队列直接作废
+    this._viewPos = { x: 0, z: 0 };
     this.chunks = new Map();      // key "cx_cz" -> {cx,cz,x0,z0,rec,high,mid,level,failedAt,retries}
     this.shards = new Map();      // cz -> {chunks:{...}} | 'loading' | Promise
     this.rows = null;             // manifest rows
@@ -123,32 +132,52 @@ export class SixLoader {
     return this.display === 'heat' ? this.matHeat : this.display === 'white' ? this.matClay : this.matNormal;
   }
 
-  // ---------- 目录 ----------
-  async _fetchJSON(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
-    return res.json();
+  // 带重试的取 JSON：一次抖动不该让整站起不来（以前 loadCatalog 任一失败就抛，app 直接报初始化失败）
+  async _fetchJSON(url, retries = 3) {
+    let lastErr = null;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+        return await res.json();
+      } catch (e) {
+        lastErr = e;
+        if (i < retries - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1)));
+      }
+    }
+    throw lastErr;
   }
 
   async loadCatalog() {
-    const mani = await this._fetchJSON(`${PKG}/chunks/index/manifest.json`);
+    // 三个目录并行取（以前串行等三趟）；远山 index 269KB 是首屏外的目录，不阻塞 fabric/分块
+    const [mani, ti, fi] = await Promise.all([
+      this._fetchJSON(`${PKG}/chunks/index/manifest.json`),
+      this._fetchJSON(`${PKG}/terrain/index.json`),
+      this._fetchJSON(`${PKG}/terrain/far/index.json`),
+    ]);
     this.rows = mani.rows || [];
-    const ti = await this._fetchJSON(`${PKG}/terrain/index.json`);
     this.terrainIndex = ti.terrain || {};
-    const fi = await this._fetchJSON(`${PKG}/terrain/far/index.json`);
     this.farIndex = fi.terrain_far || {};
     this._log(`catalog: rows=${this.rows.length} terrain=${Object.keys(this.terrainIndex).length} far=${Object.keys(this.farIndex).length}`);
   }
 
   async _shard(cz) {
     if (this.shards.has(cz)) return this.shards.get(cz);
+    // 失败行不缓存空结果：以前 catch 里 shards.set(cz, {})，一次抖动就让整行（几十块）本会话永不加载
+    const nextAt = this._failedShards.get(cz);
+    if (nextAt && performance.now() < nextAt) return {};
     const p = this._fetchJSON(`${PKG}/chunks/index/shard_${cz}.json`).then((d) => {
       const chunks = d.chunks || d;
       this.shards.set(cz, chunks);
+      this._failedShards.delete(cz);
+      this._shardFails.delete(cz);
       return chunks;
     }).catch((e) => {
       console.error('[six] shard failed', cz, e);
-      this.shards.set(cz, {});
+      this.shards.delete(cz);
+      const n = (this._shardFails.get(cz) || 0) + 1;
+      this._shardFails.set(cz, n);
+      this._failedShards.set(cz, performance.now() + Math.min(8000, 2000 * Math.pow(2, n - 1)));
       return {};
     });
     this.shards.set(cz, p);
@@ -228,22 +257,32 @@ export class SixLoader {
       if (level === 'high') this.stats.chunksHigh++;
       else this.stats.chunksMid++;
       this._setChunkLevel(e);
+      // 该档补上了：从实时失败集里清掉（累计数 filesFailed/chunksFailed 只增不减，不代表当前缺块）
+      if (level === 'high') e.failHighAt = 0; else e.failMidAt = 0;
+      if (!e.failHighAt && !e.failMidAt) this._failedChunks.delete(key);
     } catch (err) {
       this.stats.filesFailed++;
       this.stats.chunksFailed++;
       console.error('[six] chunk load failed', url, err);
+      // 退避重试：2s → 4s → 8s → 10s 封顶（以前固定 10s 死等，且失败数只增不减，验收读不到“当前还缺几块”）
       e.failedAt = performance.now();
       e.retries = (e.retries || 0) + 1;
+      const backoff = Math.min(10000, 2000 * Math.pow(2, e.retries - 1));
+      if (level === 'high') { e.failHighAt = e.failedAt; e.retryHighAt = e.failedAt + backoff; }
+      else { e.failMidAt = e.failedAt; e.retryMidAt = e.failedAt + backoff; }
+      this._failedChunks.add(key);
     }
   }
 
   _setChunkLevel(e) {
-    // 手动 LOD：近处 high，远处 mid（无 mid 则一直 high）
+    // 手动 LOD：近处 high，远处 mid（无 mid 则一直 high）。
+    // high 还没回来（加载中/失败重试）时 mid 必须顶上——以前 showHigh 只看“有没有 mid”，
+    // high 缺失也把 mid 藏起来，块直接变空白洞。
     const d = e._camDist !== undefined ? e._camDist : 0;
-    const showHigh = !e.mid || d < HIGH_R;
+    const showHigh = !!e.high && (!e.mid || d < HIGH_R);
     if (e.high) e.high.visible = showHigh;
     if (e.mid) e.mid.visible = !showHigh;
-    e.level = showHigh ? 'high' : 'mid';
+    e.level = showHigh ? 'high' : (e.mid ? 'mid' : null);
   }
 
   _disposeChunk(key) {
@@ -264,6 +303,7 @@ export class SixLoader {
       else this.stats.chunksMid--;
       this.stats.chunksLoaded--;
     }
+    this._failedChunks.delete(key);
     this.chunks.delete(key);
   }
 
@@ -279,6 +319,12 @@ export class SixLoader {
   async _refresh(view) {
     const now = performance.now();
     const { tx, tz, camX, camY, camZ, mode, aerialDist } = view;
+    // 视角跳变（传送/小地图飞/地标飞 >500m）：旧加载队列作废——以前跳过去后还按 6 并发慢慢下旧地方的包，
+    // 新地方的块排在后面，十几秒出不来，统计还停在旧地方（看着像“加载不出来”）
+    if (Math.hypot(tx - this._viewPos.x, tz - this._viewPos.z) > 500) {
+      this._viewGen++;
+      this._viewPos = { x: tx, z: tz };
+    }
     // 1) 取目标附近行的分块记录
     const shardMaps = await this._rowsFor(tz, MID_R + UNLOAD_PAD);
     const near = new Map(); // key -> {rec, dist}
@@ -290,33 +336,44 @@ export class SixLoader {
         if (d < MID_R + UNLOAD_PAD) near.set(key, { rec, dist: d });
       }
     }
-    // 2) 卸载出界的分块（滞后半径外）
+    // 2) 卸载出界的分块（滞后半径外 + 宽限 2s：滑动时刚出界的块先留着，不掉、不闪没；
+    //    以前一出界立刻卸，拖动一快就满屏重载、黑洞跟着跑）
     for (const [key, e] of [...this.chunks.entries()]) {
       const n = near.get(key);
       if (!n) {
         // 不在附近行里：按中心距目标判断（行外也可能仍在半径内，保守起见只卸确定远的）
         const c = this._chunkCenter(e.rec);
-        if (Math.hypot(c.x - tx, c.z - tz) > MID_R + UNLOAD_PAD) this._disposeChunk(key);
-      }
+        if (Math.hypot(c.x - tx, c.z - tz) > MID_R + UNLOAD_PAD) {
+          // 还没加载出任何东西的块不享受宽限：立刻丢，别占并发去下旧地方的包
+          if (!e.high && !e.mid) this._disposeChunk(key);
+          else if (!e._outSince) e._outSince = now;
+          else if (now - e._outSince > this._unloadGraceMs) this._disposeChunk(key);
+        } else e._outSince = 0;
+      } else e._outSince = 0;
     }
     // 3) 入队需要加载的分块（近处优先）
     const want = [];
     for (const [key, { rec, dist }] of near.entries()) {
       let e = this.chunks.get(key);
       if (!e) {
-        e = { cx: rec.cx, cz: rec.cz, x0: rec.x0, z0: rec.z0, rec, high: null, mid: null, level: null, retries: 0, failedAt: 0 };
+        e = { cx: rec.cx, cz: rec.cz, x0: rec.x0, z0: rec.z0, rec, high: null, mid: null, level: null, retries: 0, failedAt: 0, failHighAt: 0, failMidAt: 0, retryHighAt: 0, retryMidAt: 0 };
         this.chunks.set(key, e);
       }
       const needHigh = dist < HIGH_R;
       const needMid = dist < MID_R && rec.bytes_mid > 0 && rec.sha256_mid;
-      if (needHigh && !e.high && !e._loadingHigh && !(e.failedAt && e.retries >= 1 && now - e.failedAt < 10000)) {
+      if (needHigh && !e.high && !e._loadingHigh && now >= (e.retryHighAt || 0)) {
         want.push({ key, level: 'high', dist });
-      } else if (!needHigh && needMid && !e.mid && !e._loadingMid && !(e.failedAt && e.retries >= 1 && now - e.failedAt < 10000)) {
+      } else if (!needHigh && needMid && !e.mid && !e._loadingMid && now >= (e.retryMidAt || 0)) {
+        want.push({ key, level: 'mid', dist });
+      }
+      // high 失败重试期间，mid 先顶上（以前近环只排 high，high 一失败块就全空，只剩 fabric 垫底）
+      if (needHigh && !e.high && e.failHighAt && needMid && !e.mid && !e._loadingMid && now >= (e.retryMidAt || 0)) {
         want.push({ key, level: 'mid', dist });
       }
       // 远处已有 high 但无 mid 时不额外加载 mid（high 顶着）
     }
     want.sort((a, b) => a.dist - b.dist);
+    for (const w of want) w.gen = this._viewGen;
     for (const w of want) {
       const e = this.chunks.get(w.key);
       if (!e) continue;
@@ -341,6 +398,8 @@ export class SixLoader {
   }
 
   _pumpLoad(w) {
+    if (!this.chunks.has(w.key)) return; // 排队期间已被卸载：直接丢掉，不再发请求
+    if (w.gen !== undefined && w.gen !== this._viewGen) return; // 视角已跳走：旧队列的活直接丢掉
     if (this._activeLoads >= MAX_CONCURRENT) {
       setTimeout(() => this._pumpLoad(w), 120);
       return;
@@ -356,8 +415,53 @@ export class SixLoader {
     });
   }
 
+  // 瓦片重试退避：3s → 6s → 12s → 24s → 30s 封顶（以前失败瓦片 30s 内一律不重试，黑方块半天不出来）
+  _tileRetryDelay(key) {
+    const n = (this._tileFails.get(key) || 0) + 1;
+    this._tileFails.set(key, n);
+    return Math.min(30000, 3000 * Math.pow(2, n - 1));
+  }
+
+  _addTerrainMesh(map, loadingSet, key, root, want) {
+    loadingSet.delete(key);
+    const mesh = root.children[0] || root;
+    if (!mesh.isMesh) return;
+    if (map.has(key)) {
+      // 已有（重复请求先到了）：新解出来的这份直接释放，不进场景、不重复计数
+      if (mesh.geometry) mesh.geometry.dispose();
+      disposeMaterial(mesh.material, [this.matTerrain]);
+      return;
+    }
+    if (want && !want.has(key)) {
+      // 加载期间已出界：不进场景，直接释放，不留过期瓦片
+      if (mesh.geometry) mesh.geometry.dispose();
+      disposeMaterial(mesh.material, [this.matTerrain]);
+      return;
+    }
+    disposeMaterial(mesh.material, [this.matTerrain]);
+    mesh.material = this.matTerrain;
+    mesh.matrixAutoUpdate = false; mesh.updateMatrix();
+    mesh.frustumCulled = true;
+    this.terrainGroup.add(mesh);
+    map.set(key, mesh);
+    if (map === this.terrain) this.stats.terrainTiles++;
+    else this.stats.farTiles++;
+    this._logBoundsOnce(map === this.terrain ? 'terrain' : 'far', mesh);
+    this._failedTiles.delete((map === this.terrain ? 't:' : 'f:') + key);
+    this._tileFails.delete((map === this.terrain ? 't:' : 'f:') + key);
+  }
+
+  _failTerrainTile(map, loadingSet, key, err) {
+    loadingSet.delete(key);
+    this.stats.filesFailed++;
+    const fk = (map === this.terrain ? 't:' : 'f:') + key;
+    this._failedTiles.set(fk, performance.now() + this._tileRetryDelay(fk));
+    console.error('[six] terrain load failed', key, err);
+  }
+
   async _refreshTerrain(tx, tz) {
     if (!this.terrainIndex) return;
+    const now = performance.now();
     // 城区地形：2000m 间距，取目标 ±TERRAIN_R 内的瓦片
     const want = new Set();
     for (const [key, t] of Object.entries(this.terrainIndex)) {
@@ -374,29 +478,13 @@ export class SixLoader {
       }
     }
     for (const key of want) {
-      if (this.terrain.has(key) || this.terrain.get(key + ':loading')) continue;
-      const fAt = this._failedTiles.get('t:' + key);
-      if (fAt && performance.now() - fAt < 30000) continue; // 30s 内不重试失败瓦片
-      this.terrain.set(key + ':loading', true);
+      if (this.terrain.has(key) || this._terrainLoading.has(key)) continue;
+      const nextAt = this._failedTiles.get('t:' + key);
+      if (nextAt && now < nextAt) continue;
+      this._terrainLoading.add(key);
       this._loadGLB(`${PKG}/terrain/${key}.glb`).then((root) => {
-        this.terrain.delete(key + ':loading');
-        const mesh = root.children[0] || root;
-        if (mesh.isMesh) {
-          disposeMaterial(mesh.material, [this.matTerrain]);
-          mesh.material = this.matTerrain;
-          mesh.matrixAutoUpdate = false; mesh.updateMatrix();
-          mesh.frustumCulled = true;
-          this.terrainGroup.add(mesh);
-          this.terrain.set(key, mesh);
-          this.stats.terrainTiles++;
-          this._logBoundsOnce('terrain', mesh);
-        }
-      }).catch((err) => {
-        this.terrain.delete(key + ':loading');
-        this.stats.filesFailed++;
-        this._failedTiles.set('t:' + key, performance.now());
-        console.error('[six] terrain load failed', key, err);
-      });
+        this._addTerrainMesh(this.terrain, this._terrainLoading, key, root, want);
+      }).catch((err) => this._failTerrainTile(this.terrain, this._terrainLoading, key, err));
     }
     // 远山：取最近 FAR_MAX 片
     if (this.farIndex) {
@@ -418,29 +506,13 @@ export class SixLoader {
         }
       }
       for (const key of wantFar) {
-        if (this.far.has(key) || this.far.get(key + ':loading')) continue;
-        const fAt = this._failedTiles.get('f:' + key);
-        if (fAt && performance.now() - fAt < 30000) continue; // 30s 内不重试失败瓦片
-        this.far.set(key + ':loading', true);
+        if (this.far.has(key) || this._farLoading.has(key)) continue;
+        const nextAt = this._failedTiles.get('f:' + key);
+        if (nextAt && now < nextAt) continue;
+        this._farLoading.add(key);
         this._loadGLB(`${PKG}/terrain/far/${key}.glb`).then((root) => {
-          this.far.delete(key + ':loading');
-          const mesh = root.children[0] || root;
-          if (mesh.isMesh) {
-            disposeMaterial(mesh.material, [this.matTerrain]);
-            mesh.material = this.matTerrain;
-            mesh.matrixAutoUpdate = false; mesh.updateMatrix();
-            mesh.frustumCulled = true;
-            this.terrainGroup.add(mesh);
-            this.far.set(key, mesh);
-            this.stats.farTiles++;
-            this._logBoundsOnce('far', mesh);
-          }
-        }).catch((err) => {
-          this.far.delete(key + ':loading');
-          this.stats.filesFailed++;
-          this._failedTiles.set('f:' + key, performance.now());
-          console.error('[six] far terrain load failed', key, err);
-        });
+          this._addTerrainMesh(this.far, this._farLoading, key, root, wantFar);
+        }).catch((err) => this._failTerrainTile(this.far, this._farLoading, key, err));
       }
     }
   }
@@ -448,28 +520,31 @@ export class SixLoader {
   // ---------- 初始加载（fabric + 目标附近首批分块 + 地形） ----------
   async loadInitial(view, onProgress) {
     await this.loadCatalog();
-    // fabric 常驻
-    try {
-      const root = await this._loadGLB(`${PKG}/fabric.glb`);
-      root.traverse((o) => {
-        if (o.isMesh) {
-          disposeMaterial(o.material, [this.matFabric]);
-          o.material = this.matFabric;
-          o.matrixAutoUpdate = false; o.updateMatrix();
-          this.buildingMeshes.add(o);
-          this.fabricMesh = o;
-        }
-      });
-      this.fabric = root;
-      this.fabricGroup.add(root);
-      this.stats.fabricLoaded = true;
-      this._logBoundsOnce('fabric', root);
-    } catch (err) {
-      this.stats.filesFailed++;
-      console.error('[six] fabric load failed', err);
-    }
+    // fabric 与首批行目录并行：以前先等 7.8MB fabric 下完才开始取 shard，白白串行一趟
+    const fabricP = (async () => {
+      try {
+        const root = await this._loadGLB(`${PKG}/fabric.glb`);
+        root.traverse((o) => {
+          if (o.isMesh) {
+            disposeMaterial(o.material, [this.matFabric]);
+            o.material = this.matFabric;
+            o.matrixAutoUpdate = false; o.updateMatrix();
+            this.buildingMeshes.add(o);
+            this.fabricMesh = o;
+          }
+        });
+        this.fabric = root;
+        this.fabricGroup.add(root);
+        this.stats.fabricLoaded = true;
+        this._logBoundsOnce('fabric', root);
+      } catch (err) {
+        this.stats.filesFailed++;
+        console.error('[six] fabric load failed', err);
+      }
+    })();
+    const shardMapsP = this._rowsFor(view.tz, MID_R + UNLOAD_PAD);
+    const [shardMaps] = await Promise.all([shardMapsP, fabricP]);
     // 首批只等 high 档（近处）；mid 环由 update() 流式补，不阻塞首屏
-    const shardMaps = await this._rowsFor(view.tz, MID_R + UNLOAD_PAD);
     const jobs = [];
     for (const sm of shardMaps) {
       for (const [key, rec] of Object.entries(sm)) {
@@ -478,7 +553,7 @@ export class SixLoader {
         const d = Math.hypot(c.x - view.tx, c.z - view.tz);
         if (d < HIGH_R) {
           if (!this.chunks.has(key)) {
-            this.chunks.set(key, { cx: rec.cx, cz: rec.cz, x0: rec.x0, z0: rec.z0, rec, high: null, mid: null, level: null, retries: 0, failedAt: 0 });
+            this.chunks.set(key, { cx: rec.cx, cz: rec.cz, x0: rec.x0, z0: rec.z0, rec, high: null, mid: null, level: null, retries: 0, failedAt: 0, failHighAt: 0, failMidAt: 0, retryHighAt: 0, retryMidAt: 0 });
           }
           jobs.push({ key, level: 'high', dist: d });
         }
@@ -542,6 +617,13 @@ export class SixLoader {
   }
 
   statsSnapshot() {
-    return { ...this.stats };
+    // failedLive = 当前还缺着的（分块档 / 瓦片 / 行目录），补上即清零；累计的 filesFailed/chunksFailed 只增不减，不当验收数
+    return {
+      ...this.stats,
+      failedLive: this._failedChunks.size + this._failedTiles.size + this._failedShards.size,
+      failedChunks: [...this._failedChunks].slice(0, 20),
+      failedTiles: [...this._failedTiles.keys()].slice(0, 20),
+      failedShards: [...this._failedShards.keys()].slice(0, 20),
+    };
   }
 }
