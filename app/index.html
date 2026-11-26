@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <link rel="icon" href="data:,">
-<title>星泽市 · 虚拟城市沙盘</title>
+<title>星泽市</title>
 <link rel="stylesheet" href="./style.css">
 <script type="importmap">
 {
@@ -19,7 +19,7 @@
 <canvas id="scene"></canvas>
 
 <div id="topbar" class="glass">
-  <div><h1>星泽市</h1><div class="sub">虚拟城市沙盘 · 主城区</div></div>
+  <div><h1>星泽市</h1></div>
   <span class="badge" id="mock-badge">MOCK</span>
   <div id="mode-seg" role="tablist" aria-label="视角模式">
     <button data-mode="aerial" class="active" role="tab" aria-selected="true">航拍</button>
@@ -55,7 +55,7 @@
   <button id="drive-exit">下车</button>
 </div>
 
-<div id="stats" class="glass show">
+<div id="stats" class="glass">
   <div><b id="stat-fps">-- FPS</b></div>
   <div>draw call <span id="stat-calls">--</span> · 三角面 <span id="stat-tris">--</span></div>
   <div>建筑 <span id="stat-buildings">--</span> 栋 · 树 <span id="stat-trees">--</span> 棵</div>
@@ -67,14 +67,13 @@
   <div class="card">
     <div class="spinner"></div>
     <h1>星泽市</h1>
-    <div class="sub">虚拟城市沙盘 · 正在搭建主城区…</div>
+    <div class="sub">正在搭建主城区…</div>
   </div>
 </div>
 
 <div id="start-overlay" class="overlay" style="display:none">
   <div class="card">
     <h1>星泽市</h1>
-    <div class="sub">虚拟城市沙盘 · 主城区</div>
     <p>
       <b>拖动</b>　平移画面，画面跟手走<br>
       <b>滚轮 / 捏合</b>　航拍缩放；走路 / 飞行时只变视野，不拉相机<br>
@@ -83,7 +82,7 @@
       <b>底部时间轴</b>　0–24h，白天 / 黄昏 / 夜晚，夜里楼灯亮<br>
       <b>镜头绝不自己转</b>　没有自动环绕
     </p>
-    <button id="enter-btn">进入沙盘</button>
+    <button id="enter-btn">进入游戏</button>
     <div class="sub" id="data-note" style="margin-top:14px">正在加载城市数据…</div>
   </div>
 </div>

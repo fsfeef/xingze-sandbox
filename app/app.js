@@ -544,9 +544,10 @@ async function buildSix(index) {
   buildSkyBodies();
   buildCar();
   // 地面兜底面：低于六区地形最低点，填地形瓦片间的缝和包外空地
+  // 白膜下极浅灰（2026-11-26 地面路：原 0x8fa07a 绿色，地形瓦片未到之处整片露绿；与地形瓦片同色，缝看不见）
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(70000, 70000),
-    new THREE.MeshStandardMaterial({ color: 0x8fa07a, roughness: 1, metalness: 0 }));
+    new THREE.MeshStandardMaterial({ color: 0xe8e9ea, roughness: 1, metalness: 0 }));
   ground.rotation.x = -Math.PI / 2; ground.position.y = -2.5;
   ground.matrixAutoUpdate = false; ground.updateMatrix();
   scene.add(ground);
@@ -561,7 +562,7 @@ async function buildSix(index) {
   const view = { tx: 0, tz: 0, camX: 0, camY: 6000, camZ: 0, mode: 'aerial', aerialDist: 6000 };
   await sixLoader.loadInitial(view, (p) => {
     const el = document.querySelector('#loading-overlay .sub');
-    if (el) el.textContent = `虚拟城市沙盘 · 正在搭建主城区… ${Math.round(p * 100)}%`;
+    if (el) el.textContent = `正在搭建主城区… ${Math.round(p * 100)}%`;
   });
   minimapImg = new Image();
   minimapImg.onload = () => drawMinimap();
@@ -1337,7 +1338,7 @@ async function init() {
 $('#enter-btn').addEventListener('click', () => {
   $('#start-overlay').style.display = 'none';
   window.__sandboxStarted = true;
-  toast('星泽市沙盘 · 拖动平移，点小地图飞过去');
+  toast('星泽市 · 拖动平移，点小地图飞过去');
 });
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;

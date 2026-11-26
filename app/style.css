@@ -1,4 +1,4 @@
-/* 星泽市 · 虚拟城市沙盘 — style.css */
+/* 星泽市 — style.css */
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1220;
   font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif; overscroll-behavior: none; }

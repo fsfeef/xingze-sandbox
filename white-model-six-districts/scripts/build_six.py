@@ -512,8 +512,16 @@ def _holed_prism(acc, ring, holes, y0, y1, rgb):
 
 def _parapet(acc, ring, y, h=0.5, t=0.3, rgb=None):
     """女儿墙：沿屋顶外环每边一条薄墙（外立面 + 内立面 + 顶盖），高 0.5m、厚 0.3m。
-    内法线取边方向左手侧（CCW 外环的内侧）；环为 CW 时翻向（按 signed_area 判定）。"""
+    内法线取边方向左手侧（CCW 外环的内侧）；环为 CW 时翻向（按 signed_area 判定）。
+    退化细条环（内收 t 后不足 1 m²，如 0163-P2 的 16.6 m² 三角细条，
+    内收仅剩 0.02 m²）：顶盖按边逐块建、不裁剪，会在片内重叠双倍、
+    并伸出环外（实测带子 32.1 m² vs 期望 16.6）。环窄到连 0.3m 盖都
+    放不下时不建女儿墙（平顶）。口径与验证器 band 跳过一致
+    （inner.area < 1.0，2026-11-26 总协调）。"""
     if rgb is None: rgb = [0.91, 0.91, 0.91]
+    _inner = _ShpPolygon(ring).buffer(-t, join_style=2)
+    if _inner.is_empty or _inner.area < 1.0:
+        return
     s = 1.0 if signed_area(ring) >= 0 else -1.0
     n = len(ring)
     for i in range(n):

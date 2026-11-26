@@ -5,10 +5,9 @@
 //      顶面 = 法线朝上（ny>0.85）的三角面；按共享顶点位置并查集聚成"一栋楼的顶"。
 //   ② 顶面逐面重着色（高度带冷蓝紫）；顶面轮廓（凸包）加女儿墙 + 霓虹顶线。
 //   ③ 按位置哈希种子确定性分型（SplitMix64，同一栋每次加载同一个顶）：
-//      高层两级退台冠顶 + 幕墙竖线 + 转角亮边 / 中层坡顶·四坡顶·三角坡顶·圆角顶 /
-//      低层平顶 + 屋顶机房盒子；大底盘另加裙楼（h>=30）；
-//      圆角/棱角两种顶形按种子分（13:49：圆角还是棱角照参考图；参考截图未到，
-//      本轮两种都做、种子固定，等截图到了再调比例）。
+//      2026-11-26 第一步：盖子全拆，通用楼只剩平顶（什么都不加）；女儿墙尺寸、
+//      设备盒、塔楼收分、传统民居坡顶全是细打磨，等白模对比过了再做，本轮不上。
+//      高层幕墙竖线 + 转角亮边保留（立面，不动）；大底盘另加裙楼（h>=30）。
 //   ④ 25 地标里 1 路只做屋顶造型的 16 座（归属表 lane-coordination §5），每座一个
 //      独立形制（见 LANDMARK_FORM）：古建风（檐板+四坡顶+宝顶/重檐/八角亭）/
 //      现代风（退台冠顶+霓虹框+LED屏）/ 工业锯齿顶 / 大跨度站房屋顶 / 低层灰瓦街区。
@@ -442,10 +441,9 @@ function weightedPick(rng, table) {
   for (const [item, w] of table) { roll -= w; if (roll < 0) return item; }
   return table[table.length - 1][0];
 }
-// 屋顶语法（unreal ② PCG 语法生成 + 退台 + 皇冠屋顶，落到我们自己的分型表）：
+// 屋顶语法旧表（2026-11-26 起不再参与分型：盖子拿掉，见 applyRoofGrammar 前注释）。
+//   表留着只为扫掠脚本 G2/G3 钉 weightedPick 的确定性/分布，不删。
 //   规则 = 高度带 → 形制加权表；同一栋种子固定，同一栋每次同一个顶。
-//   高层 = 退台 + 皇冠盖顶（Mansard / 倒角 / 按轮廓四坡，三选一）；中层 = 坡顶系；
-//   低层 = 坡顶 / 三角坡 / 平顶+斜顶机房。方块盒子不再是任何一条规则的产物。
 const ROOF_GRAMMAR = {
   high: [['mansard-crown', 0.45], ['chamfer-crown', 0.35], ['hip-crown', 0.20]],
   mid: [['hip', 0.30], ['gable', 0.25], ['mansard', 0.20], ['setback', 0.15], ['round', 0.10]],
@@ -563,65 +561,22 @@ function clusterTopFaces(geo) {
 //   阶段 3 材质/灯光：高度带冷蓝紫 + 霓虹框/角部信标（img2threejs 分阶段建造：
 //   blockout → structure → form → material → lighting，一阶段一阶段过，不一口吃成）。
 // proxy 只读几何实测值，不编数；form 由语法表 + 子种子定。
+// ---- 屋顶语法（第一步：盖子全拆，只剩平顶）----
+// 2026-11-26 老大定顺序：先照参考白模对比，没问题了再打磨楼顶。
+//   第一步只做：盖子全拆干净，顶就是楼自己的平顶，不加任何东西。
+//   女儿墙尺寸、设备盒、塔楼收分、传统民居坡顶——全是细打磨，等白模对比
+//   过了再做，别现在就上。以后不许再出现后贴盖子这种糊弄，顶只能是楼自己的顶。
+//   形制只剩一种：'flat'（平顶，什么都不加；女儿墙带在 buildChunkRoofs 里，
+//   是旧代码原样保留的 0.9m 高/0.35m 厚，本轮不动它）。
+//   ROOF_GRAMMAR 加权表不再参与分型，只留给扫掠脚本 G2/G3 钉 weightedPick 用。
 function applyRoofGrammar(g, hull, solid, neon, rngForm, neonC) {
-  const topY = g.topY, cx = g.cx, cz = g.cz;
-  const crownC = [0.20, 0.25, 0.45];
-  const crownC2 = [0.23, 0.29, 0.48];
-  const tileC = [0.16, 0.21, 0.40];
-  let form;
-  if (g.h >= 60) {
-    form = weightedPick(rngForm, ROOF_GRAMMAR.high);
-    const iw = g.w * 0.62, id = g.d * 0.62;
-    const ch = 4 + rngForm() * 3;
-    const tierHull = hull.map((p) => { const gx = cx, gz = cz; return [gx + (p[0] - gx) * 0.62, gz + (p[1] - gz) * 0.62]; });
-    if (form === 'mansard-crown') {
-      pushChamferCrown(solid, cx, topY, cz, iw, ch * 0.55, id, crownC);
-      pushMansard(solid, cx, topY + ch * 0.55, cz, iw * 0.68, ch * 0.45, id * 0.68, crownC2);
-    } else if (form === 'chamfer-crown') {
-      pushChamferCrown(solid, cx, topY, cz, iw, ch * 0.6, id, crownC);
-      pushChamferCrown(solid, cx, topY + ch * 0.6, cz, iw * 0.62, ch * 0.4, id * 0.62, crownC2);
-    } else { // hip-crown：退台 + 按真实轮廓的四坡顶
-      pushChamferCrown(solid, cx, topY, cz, iw, ch * 0.55, id, crownC);
-      pushHipFromHull(solid, tierHull, topY + ch * 0.55, ch * 0.45, crownC2);
-    }
-    pushNeonFrame(neon, cx, topY + ch, cz, iw * 0.62, id * 0.62, neonC);
-    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-      pushCylinder(neon, cx + sx * iw * 0.44, topY + ch, cz + sz * id * 0.44, 0.45, 1.6, neonC, 8);
-    }
-  } else if (g.h >= 20) {
-    form = weightedPick(rngForm, ROOF_GRAMMAR.mid);
-    if (form === 'setback' && g.h < 40) form = 'hip'; // 退台只给中高层（R03/L03），不够高退回四坡顶
-    if (form === 'hip') {
-      if (!pushHipFromHull(solid, hull, topY, Math.max(2.5, Math.min(9, Math.min(g.w, g.d) * 0.22)), tileC)) {
-        pushPyramid(solid, cx, topY, cz, g.w * 0.96, Math.max(2.5, Math.min(9, Math.min(g.w, g.d) * 0.22)), g.d * 0.96, tileC);
-      }
-    } else if (form === 'gable') {
-      pushPrism(solid, cx, topY, cz, g.w * 0.96, Math.max(2, Math.min(7, Math.min(g.w, g.d) * 0.18)), g.d * 0.96, tileC, g.w >= g.d);
-    } else if (form === 'mansard') {
-      pushMansard(solid, cx, topY, cz, g.w * 0.96, Math.max(2.5, Math.min(7, Math.min(g.w, g.d) * 0.2)), g.d * 0.96, tileC);
-    } else if (form === 'setback') {
-      pushChamferCrown(solid, cx, topY, cz, g.w * 0.7, 3, g.d * 0.7, crownC);
-      pushMansard(solid, cx, topY + 3, cz, g.w * 0.45, 2.2, g.d * 0.45, crownC2);
-      pushNeonFrame(neon, cx, topY + 5.2, cz, g.w * 0.45, g.d * 0.45, neonC);
-    } else { // round：圆角顶
-      pushCylinder(solid, cx, topY, cz, Math.min(g.w, g.d) * 0.36, 2.5 + rngForm() * 1.5, [0.17, 0.22, 0.41]);
-    }
-  } else {
-    form = weightedPick(rngForm, ROOF_GRAMMAR.low);
-    if (form === 'hip') {
-      if (!pushHipFromHull(solid, hull, topY, Math.max(2, Math.min(4, Math.min(g.w, g.d) * 0.2)), tileC)) {
-        pushPyramid(solid, cx, topY, cz, g.w * 0.9, Math.max(2, Math.min(4, Math.min(g.w, g.d) * 0.2)), g.d * 0.9, tileC);
-      }
-    } else if (form === 'gable') {
-      pushPrism(solid, cx, topY, cz, g.w * 0.9, Math.max(2, Math.min(4, Math.min(g.w, g.d) * 0.18)), g.d * 0.9, tileC, g.w >= g.d);
-    } else { // flat-plant：平顶 + 斜顶机房（机房不再是方块盒子）
-      pushMansard(solid, cx, topY, cz, g.w * 0.3, 2.2 + rngForm() * 1.2, g.d * 0.3, [0.18, 0.23, 0.42]);
-      pushPyramid(solid, cx - g.w * 0.22, topY, cz + g.d * 0.2, 3.6, 1.4, 3.6, [0.15, 0.19, 0.36]);
-    }
-  }
-  S.grammar[form] = (S.grammar[form] || 0) + 1;
-  return form;
+  // 第一步：什么都不加。平顶就是分块 GLB 自己的顶面；种子仍钉死（同一栋每次同一个顶，
+  //   目前只有 'flat' 一种，确定性由扫掠 G5b 钉着）。
+  S.grammar['flat'] = (S.grammar['flat'] || 0) + 1;
+  return 'flat';
 }
+
+
 
 function buildChunkRoofs(mesh, key) {
   const geo = mesh.geometry;
@@ -1034,6 +989,13 @@ function applyMode() {
   if (ln) ln.visible = !white && !heat && nightOn;
   const lm = landmarkGroup.getObjectByName('landmark-metal');
   if (lm) lm.visible = !white; // 金属盖板跟实体走：白膜换陶土色，热力留
+  // 白膜去黑框：分块 GLB 里 baked 的楼边线，perf.js 全城合并成
+  //   chunk-merged-line-global（matLine 深色），白膜下没有任何隐藏逻辑。
+  //   线的所有权在 perf.js/six-loader.js，本处只在白膜下控显隐；
+  //   彻底的修法是 perf.js tickTiles 里按模式决定建不建线合并体，改天挪过去。
+  const lineMerged = (ctx && ctx.scene && typeof ctx.scene.getObjectByName === 'function')
+    ? ctx.scene.getObjectByName('chunk-merged-line-global') : null;
+  if (lineMerged) lineMerged.visible = !white;
   applyClay(white);
 }
 // 白膜换陶土色：实体 mesh（solid/metal）换无顶点色的 #f2f0ea 材质，

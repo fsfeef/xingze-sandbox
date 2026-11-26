@@ -124,7 +124,23 @@ export class SixLoader {
 
     // 全城共享材质（不随分块新建，避免 program/材质爆炸）
     this.matNormal = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 });
-    this.matClay = new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 0.95, metalness: 0 });
+    // 白膜下树按参考收深：分块里树是两片交叉绿面片，与楼同在一个合并网格里，只能按顶点色在片元里区分。
+    // 树绿（R 0.28–0.38, G 0.48–0.58）与绿化带同色，一并收深；楼全是纯灰（0.70–0.91），公园/绿地绿更亮（G≥0.65），不会误判。
+    this.matClay = new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 0.95, metalness: 0, vertexColors: true });
+    const _treeDark = new THREE.Color(0x3a3d40); // 深灰近黑（参考：树是深灰/近黑不规则团块）
+    const _clayLite = new THREE.Color(0xf2f0ea);
+    this.matClay.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+    {
+      vec3 vc = vColor;
+      bool isTree = (vc.g > vc.r + 0.08) && (vc.g > vc.b + 0.08) && (vc.g < 0.62) && (vc.r < 0.42);
+      if (isTree) { diffuseColor.rgb = vec3(${_treeDark.r.toFixed(4)}, ${_treeDark.g.toFixed(4)}, ${_treeDark.b.toFixed(4)}); }
+      else { diffuseColor.rgb = vec3(${_clayLite.r.toFixed(4)}, ${_clayLite.g.toFixed(4)}, ${_clayLite.b.toFixed(4)}); }
+    }`
+      );
+    };
     this.matHeat = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0.05 });
     this.matHeat.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
@@ -150,8 +166,8 @@ export class SixLoader {
     });
     this.matFabricHeat.onBeforeCompile = this.matHeat.onBeforeCompile;
     this.matTerrain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 0 });
-    // 白膜下地形也用陶土色（2026-11-26 17:06 令：颜色全撤；否则白膜里地面一直是绿的）
-    this.matTerrainClay = new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 1, metalness: 0 });
+    // 白膜下地形也用极浅灰（2026-11-26 地面路：参考广场白色/极浅灰、周边浅灰；原 0xf2f0ea 偏暖白）
+    this.matTerrainClay = new THREE.MeshStandardMaterial({ color: 0xe8e9ea, roughness: 1, metalness: 0 });
 
     // 地形组（供地面高度射线查询）
     this.terrainGroup = new THREE.Group();
@@ -628,8 +644,8 @@ export class SixLoader {
       disposeMaterial(mesh.material, [this.matTerrain]);
       return;
     }
-    disposeMaterial(mesh.material, [this.matTerrain]);
-    mesh.material = this.matTerrain;
+    disposeMaterial(mesh.material, [this.matTerrain, this.matTerrainClay]);
+    mesh.material = this._terrainMat(); // 跟随当前显示模式：白膜下浅灰，否则后加载的瓦片一直是顶点色灰、与已切换的瓦片色块不一
     mesh.matrixAutoUpdate = false; mesh.updateMatrix();
     mesh.frustumCulled = true;
     this.terrainGroup.add(mesh);
