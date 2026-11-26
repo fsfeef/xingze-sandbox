@@ -386,8 +386,8 @@ function buildRoadPaint(THREE, data, builders) {
     const isMain = road.grade === 0;
     // 中心虚线：6m 画、8m 空（复用 app.js markingGeo 的 14m 周期画法）
     const info = routeInfo(pts);
-    const dashColor = isMain ? yC : wC;
-    const dashBuilder = isMain ? yellow : white;
+    const dashColor = wC; // 19:18 令：对照参考站，主干中心线也不用黄色，全部白色虚线
+    const dashBuilder = white;
     let d = 0;
     while (d < info.total) {
       const a = sampleRoute(info, d), b = sampleRoute(info, Math.min(d + 6, info.total));
