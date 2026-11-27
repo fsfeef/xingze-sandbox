@@ -45,6 +45,7 @@ ROOT = "/home/hatch/workspace/chengdu-city"
 DATA = os.path.join(ROOT, "data")
 WM = os.path.join(ROOT, "white-model")
 OUT = "/home/hatch/workspace/virtual-city/white-model-six-districts"
+VC = "/home/hatch/workspace/virtual-city"   # 2026-11-27 D3：桥/公园/BRT/水口数据文件所在目录
 CHUNK = 500.0
 OX, OZ = -60000.0, -51000.0   # chunk 网格原点（米；覆盖道路/河流外延）
 DATUM = 506.0                 # DEM 绝对高程 - 506（6 瓦片新 DEM 天府广场 506.1 -> 约 0）
@@ -56,7 +57,7 @@ LAT_M = 110540.0              # 每纬度米数
 # 内的要素，区外全部删掉。楼按轮廓中心点判断；多边形按真实裁剪；线/点按中点/点判断。
 import sys as _sys
 _sys.path.insert(0, "/home/hatch/.local/lib/python3.12/site-packages")
-from shapely.geometry import Polygon as _ShpPolygon, MultiPolygon as _ShpMulti, Point as _ShpPoint
+from shapely.geometry import Polygon as _ShpPolygon, MultiPolygon as _ShpMulti, Point as _ShpPoint, LineString as _ShpLine
 from shapely.ops import unary_union as _unary_union
 from shapely.prepared import prep as _prep
 try:
@@ -168,7 +169,10 @@ CHUNK_KEYS = ["b", "roads", "rivers", "water", "water_islands", "metro_line", "m
               "elev", "piers", "toll_booths", "toll_plazas", "landuse", "natrail",
               "natrail_stations", "lamps", "lamps_bridge", "lamps_tunnel", "flowers", "trees", "greenway", "runway", "aprons",
               "special_lines", "special_tris", "road_ribbons", "vpiers", "mt_pois",
-              "tunnels", "tunnel_portals", "river_rails"]  # 2026-11-26 修底子：隧道段计数/洞口/河岸栏杆
+              "tunnels", "tunnel_portals", "river_rails",
+              "guardrails", "brt_platforms", "park_paths", "park_amenities",
+              "park_pavilions", "park_leisure", "plaza_circles", "foot_stairs"]  # 2026-11-26 修底子：隧道段计数/洞口/河岸栏杆
+              # 2026-11-27 D3：高架护栏 / BRT 站台 / 园路 / 公园小品 / 亭子 / 天桥楼梯
 
 def new_chunk():
     return {k: [] for k in CHUNK_KEYS}
@@ -465,6 +469,124 @@ def flat_poly(acc, ring, y, rgb):
         acc.tri([ring[a][0], y, ring[a][1]], [ring[b][0], y, ring[b][1]],
                 [ring[c][0], y, ring[c][1]], up, rgb)
 
+# ---- 2026-11-27 D3：星泽广场三圆几何助手（与 build_plaza_circles.py 同款函数、同参数；独立脚本只出验收叠加层，本处是进游戏包的烘焙口径）----
+_PZ_SEG = 64  # 大圆分段数
+def circle_pts(cx, cz, r, n=_PZ_SEG):
+    pts = []
+    for i in range(n):
+        a = 2.0 * math.pi * i / n
+        pts.append([cx + r * math.cos(a), cz + r * math.sin(a)])
+    return pts
+def annulus_top(acc, cx, cz, r_out, r_in, y, rgb, n=_PZ_SEG):
+    """平环顶面 (r_in..r_out)，法线向上。"""
+    up = [0, 1, 0]
+    for i in range(n):
+        a0 = 2.0 * math.pi * i / n
+        a1 = 2.0 * math.pi * (i + 1) / n
+        o0 = [cx + r_out * math.cos(a0), y, cz + r_out * math.sin(a0)]
+        o1 = [cx + r_out * math.cos(a1), y, cz + r_out * math.sin(a1)]
+        i0 = [cx + r_in * math.cos(a0), y, cz + r_in * math.sin(a0)]
+        i1 = [cx + r_in * math.cos(a1), y, cz + r_in * math.sin(a1)]
+        acc.quad(o0, o1, i1, i0, up, rgb)
+def disc_top(acc, cx, cz, r, y, rgb, n=_PZ_SEG):
+    """实心圆盘顶面，法线向上。"""
+    up = [0, 1, 0]
+    c = [cx, y, cz]
+    ring = circle_pts(cx, cz, r, n)
+    for i in range(n):
+        p0 = [ring[i][0], y, ring[i][1]]
+        p1 = [ring[(i + 1) % n][0], y, ring[(i + 1) % n][1]]
+        acc.tri(c, p0, p1, up, rgb)
+def wall_band(acc, cx, cz, r, y_top, y_bot, rgb, n=_PZ_SEG, inward=True):
+    """半径 r 处的竖直圆柱面 (y_bot..y_top)。
+    inward=True：法线指圆心（碗内台阶立面）；False：法线向外（岛/柱侧壁）。"""
+    for i in range(n):
+        a0 = 2.0 * math.pi * i / n
+        a1 = 2.0 * math.pi * (i + 1) / n
+        am = (a0 + a1) / 2.0
+        s = -1.0 if inward else 1.0
+        nrm = [s * math.cos(am), 0, s * math.sin(am)]
+        t0 = [cx + r * math.cos(a0), y_top, cz + r * math.sin(a0)]
+        t1 = [cx + r * math.cos(a1), y_top, cz + r * math.sin(a1)]
+        b0 = [cx + r * math.cos(a0), y_bot, cz + r * math.sin(a0)]
+        b1 = [cx + r * math.cos(a1), y_bot, cz + r * math.sin(a1)]
+        acc.quad(t0, t1, b1, b0, nrm, rgb)
+def arc_annulus_top(acc, cx, cz, r_out, r_in, y, rgb, a0_deg, a1_deg, n=16):
+    """扇形环顶面（角度 a0..a1 度），法线向上。"""
+    up = [0, 1, 0]
+    a0 = math.radians(a0_deg)
+    a1 = math.radians(a1_deg)
+    for i in range(n):
+        f0 = i / n
+        f1 = (i + 1) / n
+        ang0 = a0 + (a1 - a0) * f0
+        ang1 = a0 + (a1 - a0) * f1
+        o0 = [cx + r_out * math.cos(ang0), y, cz + r_out * math.sin(ang0)]
+        o1 = [cx + r_out * math.cos(ang1), y, cz + r_out * math.sin(ang1)]
+        i0 = [cx + r_in * math.cos(ang0), y, cz + r_in * math.sin(ang0)]
+        i1 = [cx + r_in * math.cos(ang1), y, cz + r_in * math.sin(ang1)]
+        acc.quad(o0, o1, i1, i0, up, rgb)
+def arc_wall_band(acc, cx, cz, r, y_top, y_bot, rgb, a0_deg, a1_deg,
+                  n=16, inward=False):
+    """扇形竖直圆柱面（角度 a0..a1 度）。"""
+    a0 = math.radians(a0_deg)
+    a1 = math.radians(a1_deg)
+    for i in range(n):
+        f0 = i / n
+        f1 = (i + 1) / n
+        ang0 = a0 + (a1 - a0) * f0
+        ang1 = a0 + (a1 - a0) * f1
+        am = (ang0 + ang1) / 2.0
+        s = -1.0 if inward else 1.0
+        nrm = [s * math.cos(am), 0, s * math.sin(am)]
+        t0 = [cx + r * math.cos(ang0), y_top, cz + r * math.sin(ang0)]
+        t1 = [cx + r * math.cos(ang1), y_top, cz + r * math.sin(ang1)]
+        b0 = [cx + r * math.cos(ang0), y_bot, cz + r * math.sin(ang0)]
+        b1 = [cx + r * math.cos(ang1), y_bot, cz + r * math.sin(ang1)]
+        acc.quad(t0, t1, b1, b0, nrm, rgb)
+def cylinder(acc, cx, cz, r, y0, y1, rgb, n=_PZ_SEG):
+    """实心圆柱（顶面 + 侧壁，法线向外）。"""
+    disc_top(acc, cx, cz, r, y1, rgb, n)
+    wall_band(acc, cx, cz, r, y1, y0, rgb, n, inward=False)
+def thick_disc(acc, cx, cz, r, y0, y1, rgb, n=_PZ_SEG):
+    """薄圆盘（顶面 + 侧壁），与 cylinder 同构，语义上是层板。"""
+    cylinder(acc, cx, cz, r, y0, y1, rgb, n)
+def disc_with_hole(acc, cx, cz, r, y, rgb, hole_cx, hole_cz, hole_r,
+                   n_rings=12, n_sectors=48, buf=2.0):
+    """带偏心圆洞的圆盘顶面（极坐标网格：环 x 扇区）。
+    只保留中心在盘内（r<=R）且在洞外（距洞心 >= hole_r+buf）的格子；
+    洞边呈网格锯齿（约 3m），由剧场 rim 环（R24-27.3，高出圆盘 0.04）盖住，
+    残留缝隙下是地形（[0.85]，与圆盘 [0.84] 同色系），不可见。外缘跟圆（无锯齿），中心为扇形。"""
+    up = [0, 1, 0]
+    ring_r = [r * i / n_rings for i in range(n_rings + 1)]
+    hr = hole_r + buf
+    kept = 0
+    for i in range(n_rings):
+        r0, r1 = ring_r[i], ring_r[i + 1]
+        for j in range(n_sectors):
+            a0 = 2.0 * math.pi * j / n_sectors
+            a1 = 2.0 * math.pi * (j + 1) / n_sectors
+            am = (a0 + a1) / 2.0
+            rm = (r0 + r1) / 2.0
+            ccx = cx + rm * math.cos(am)
+            ccz = cz + rm * math.sin(am)
+            if (ccx - hole_cx) ** 2 + (ccz - hole_cz) ** 2 < hr * hr:
+                continue
+            def pt(rr, ang):
+                return [cx + rr * math.cos(ang), y, cz + rr * math.sin(ang)]
+            if i == 0:
+                acc.tri([cx, y, cz], pt(r1, a0), pt(r1, a1), up, rgb)
+            else:
+                acc.quad(pt(r0, a0), pt(r0, a1), pt(r1, a1), pt(r1, a0),
+                         up, rgb)
+            kept += 1
+    return kept
+# 广场圆环烘焙排除的 3 栋冲突楼（_corr_fp，heights-v2.1 ctx 环）：
+# db5d961c293fb5d4 花盘楼 549931755（GloBFP 错标 38.6m，OSM 实测 0.8m）；
+# ef5fef285088f342 Ø37m 圆台楼（3.0m 层数推算，与实测基座 2.5m 矛盾）；
+# da21298429a62791 剧场中心八边形楼（h 2.0m，y -2.0..0.0，挡碗底/中央构筑）。
+_PLAZA_EXCLUDE_FP = {"db5d961c293fb5d4", "ef5fef285088f342", "da21298429a62791"}
+
 # ---- 2026-11-26 satellite-fix 样板 · 重叠楼综合体 (overlap-complex-v1) ----
 # 只服务建模层 virtual-city/data/overlap-complex-v1.json 的 2 处样板（7 条足迹），
 # 全城其他楼一律走上面的素棱柱。Acc.tri 按给定法线自动纠绕向，故这里只给对法线。
@@ -675,6 +797,22 @@ DECK_FALLBACK_HALF = {"motorway": 5.25, "motorway_link": 3.5, "trunk": 5.25,
     "secondary_link": 3.5, "tertiary": 4.0, "tertiary_link": 3.5,
     "footway": 1.5, "cycleway": 1.5, "steps": 1.5, "path": 1.5, "pedestrian": 1.5}
 # 宽度缺省值 = road-widths-v1.json 里的中位数（motorway 10.5m / _link 7.0m），推算，标 fallback
+# 2026-11-27 D3 路灯高：lamps-city 新 tiles 自带 h（12/10/8/6m 四档，灯路重提）；
+# 桥灯 tiles 无 h 字段，按 hw 用同一张表映射（与 city tiles 的 hw→h 分布一致：
+# 主干道含 secondary → 12m；tertiary → 10m；residential/unclassified → 8m；其余 6m）。
+LAMP_H_BY_HW = {"motorway": 12.0, "motorway_link": 12.0, "trunk": 12.0, "trunk_link": 12.0,
+                "primary": 12.0, "primary_link": 12.0, "secondary": 12.0, "secondary_link": 12.0,
+                "tertiary": 10.0, "tertiary_link": 10.0,
+                "residential": 8.0, "unclassified": 8.0}
+LAMP_H_DEFAULT = 6.0
+def lamp_height(lp):
+    """2026-11-27 D3 灯高：有 h 用 h（lamps-city 新 tiles 四档 12/10/8/6m）；
+    无 h 按 hw 查表（桥灯 tiles 无 h）；再无则回落 style（9.12/8.05m 旧值）。"""
+    if lp.get("h") is not None:
+        return float(lp["h"])
+    if lp.get("hw") in LAMP_H_BY_HW:
+        return LAMP_H_BY_HW[lp["hw"]]
+    return 9.12 if lp.get("style", 0) == 0 else 8.05
 _DECK_SHADES = [[0.40, 0.40, 0.50], [0.50, 0.50, 0.60], [0.60, 0.60, 0.68],
                 [0.70, 0.70, 0.76], [0.80, 0.80, 0.84]]  # L1 最深 → L5 最浅
 def deck_top_shade(layer, mean_h):
@@ -746,6 +884,37 @@ def main():
             return default
     water_v1 = _load_json(os.path.join(DATA, "batch1", "osm", "water-v1.json"),
                           {"water_lines": [], "water_polys": []})
+    # ---- 2026-11-27 D3 水面并集（米制 points_local；供过水补桥定段 + 道路跳水段 + 栏杆抠洞） ----
+    _wpolys = []
+    for _wp in water_v1.get("water_polys", []):
+        _pl = _wp.get("points_local") or []
+        if len(_pl) < 3:
+            continue
+        try:
+            _pp = _ShpPolygon(_pl)
+            if not _pp.is_valid:
+                _pp = _pp.buffer(0)
+            if not _pp.is_empty and _pp.area > 0:
+                _wpolys.append(_pp)
+        except Exception:
+            continue
+    _WATER_UNION = _unary_union(_wpolys) if _wpolys else None
+    _PREP_WATER = _prep(_WATER_UNION) if _WATER_UNION is not None else None
+    def _in_water(_x, _z):
+        return bool(_PREP_WATER is not None and _PREP_WATER.contains(_ShpPoint(_x, _z)))
+    def _seg_water_len(_a, _b):
+        # 段 a->b 落在水面多边形内的长度（m）。只碰岸线=0；长段斜跨窄河时中点落在水外也能量到。
+        if _PREP_WATER is None:
+            return 0.0
+        try:
+            _ln = _ShpLine([_a, _b])
+            if not _PREP_WATER.intersects(_ln):
+                return 0.0
+            _g = _WATER_UNION.intersection(_ln)
+            return float(_g.length) if not _g.is_empty else 0.0
+        except Exception:
+            return 0.0
+    print(f"water union: {len(_wpolys)} polys, area {(_WATER_UNION.area/1e6 if _WATER_UNION is not None else 0):.2f} km2")
     landuse = _load_json(os.path.join(DATA, "landuse", "landuse-v1.json"), {"features": []})
     widths = _load_json(os.path.join(DATA, "roads", "road-widths-v1.json"), {"roads": []})
     width_by_id = {}
@@ -761,6 +930,35 @@ def main():
     street_trees = _load_json(os.path.join(WM, "data", "street-trees-v1.json"), {"points": []})
     aeroway = _load_json(os.path.join(WM, "data", "aeroway-v1.json"), {"features": []})
     mt_pois = _load_json(os.path.join(WM, "data", "mountain-pois-v1.json"), {"points": []})
+    # ---- 2026-11-27 D3 数据文件（各数据路交付，只消费、不重做；缺文件则空着，不造假） ----
+    _elev_ovr = _load_json(os.path.join(VC, "data", "bridge-elev-overrides-v1.json"),
+                      {"restores": [], "pins": [], "cascade": []})
+    _fbdecks = _load_json(os.path.join(VC, "data", "bridge-fb-decks-v1.json"), {"decks": []})
+    _bpiers = _load_json(os.path.join(VC, "data", "bridge-piers-v1.json"), {"piers": []})
+    _brails = _load_json(os.path.join(VC, "data", "bridge-guardrails-v1.json"), {"guardrails": []})
+    _bstairs = _load_json(os.path.join(VC, "data", "bridge-footbridge-stairs-v1.json"), {"footbridges": []})
+    _nportals = _load_json(os.path.join(VC, "data", "tunnel-portals-nonvehicle-v1.json"), {"portals": []})
+    _brt = _load_json(os.path.join(VC, "data", "brt-stations-v1.json"), {"stations": []})
+    _parks = _load_json(os.path.join(VC, "data", "six-parks-v1.json"), {"paths": [], "trees": {}})
+    _pamen = _load_json(os.path.join(VC, "data", "park-amenities-v1.json"), {"items": []})
+    _pleis = _load_json(os.path.join(VC, "data", "six-park-leisure.json"), {"items": []})
+    _plaza = _load_json(os.path.join(VC, "data", "plaza-circles-v2.json"), {"disc": {}, "structures": []})
+    # 广场圆盘（R75）shapely 圆：landuse ground_cut 用；地形碗压点在 terrain 段另算
+    _pz_disc = None; _pz_disc_prep = None
+    if _plaza.get("disc"):
+        _dc = _plaza["disc"]["center"]
+        _pz_disc = _ShpPoint(float(_dc["x"]), float(_dc["z"])).buffer(float(_plaza["disc"]["radius_m"]), resolution=16)
+        _pz_disc_prep = _prep(_pz_disc)
+    _xcross = _load_json(os.path.join(VC, "water-crossing-verdicts-2026-11-27.json"), [])
+    print(f"D3 data: overrides restores {len(_elev_ovr.get('restores', []))} pins {len(_elev_ovr.get('pins', []))} "
+          f"cascade {len(_elev_ovr.get('cascade', []))}; FB decks {len(_fbdecks.get('decks', []))}; "
+          f"piers {len(_bpiers.get('piers', []))}; guardrails {len(_brails.get('guardrails', []))}; "
+          f"footbridge stairs {len(_bstairs.get('footbridges', []))}; non-vehicle portals "
+          f"{len(_nportals.get('portals', []))}; BRT {len(_brt.get('stations', []))}; "
+          f"park paths {len(_parks.get('paths', []))}; park amenities {len(_pamen.get('items', []))}; "
+          f"park leisure {len(_pleis.get('items', []))}; "
+          f"plaza circles {len(_plaza.get('structures', []))} structures + disc; "
+          f"water crossings {len(_xcross) if isinstance(_xcross, list) else 0}")
     _wc = None
     try:
         _wcz = np.load(os.path.join(DATA, "batch1", "worldcover", "worldcover-bone-bbox-10m.npz"))
@@ -808,6 +1006,33 @@ def main():
           f"of which max-end>0: "
           f"{sum(1 for v in elev_info.values() if max(v['start_h'], v['end_h']) > 0)}); "
           f"reconcile: {dict(_rstats)}")
+    # ---- 2026-11-27 D3 桥路：elev overrides（bridge-elev-overrides-v1.json 单一事实源） ----
+    # reconcile 之后、任何 elev 消费之前应用。restores/cascade/pins 各条的 vertex_heights_m
+    # 直接顶替 vertex_heights() 的插值（坡已烤进顶点高，ramps[] 只是审计 trail）。
+    # hw_interchange.py 的恢复/pin 代码已回退（只留 docstring 标签修正），避免双份事实源。
+    _ovr_n = {"restores": 0, "cascade": 0, "pins": 0, "missing": 0, "vh_mismatch": 0}
+    for _sec in ("restores", "cascade", "pins"):
+        for _en in _elev_ovr.get(_sec, []):
+            _oid = _en.get("osm_id")
+            _ev = elev_info.get(_oid)
+            if _ev is None:
+                _ovr_n["missing"] += 1
+                continue
+            _vh = _en.get("vertex_heights_m") or []
+            _npts = len(way_pts(_roads_by_id[_oid])) if _oid in _roads_by_id else 0
+            if _vh and len(_vh) == _npts:
+                _ev["vertex_heights_m"] = [float(v) for v in _vh]
+                _ev["start_h"] = float(_vh[0])
+                _ev["end_h"] = float(_vh[-1])
+            else:
+                if _vh:
+                    _ovr_n["vh_mismatch"] += 1
+                if "start_h_m" in _en:
+                    _ev["start_h"] = float(_en["start_h_m"])
+                if "end_h_m" in _en:
+                    _ev["end_h"] = float(_en["end_h_m"])
+            _ovr_n[_sec] += 1
+    print(f"elev overrides applied: {_ovr_n} (source bridge-elev-overrides-v1.json)")
     # 收费站（PBF 实抽，toll-booths-v1.json；无文件则跳过，不造假）
     toll_path = os.path.join(WM, "data", "toll-booths-v1.json")
     toll = json.load(open(toll_path)) if os.path.exists(toll_path) else \
@@ -818,9 +1043,186 @@ def main():
     for _oid, _ev in elev_info.items():
         _r = _roads_by_id[_oid]
         _lp = way_pts(_r)
-        _vh = vertex_heights(_lp, _ev["start_h"], _ev["end_h"])
+        _vh = _ev.get("vertex_heights_m") or vertex_heights(_lp, _ev["start_h"], _ev["end_h"])
         for _p, _h in zip(_lp, _vh):
             _node_elev_h.setdefault(key_of(*_p), []).append(_h)
+    # ---- 2026-11-27 D3 预计算：FB 实心桥面段 + 过水补桥段/墩 + 桥面投影格网 + BRT 站台 ----
+    # FB decks：bridge-fb-decks-v1.json（六区内 377 条 / 2,508 段，坡已烤进 vertex_heights_m）。
+    # 过水补桥：water-crossing-verdicts B=23（真缺桥；A/C/D 一律不建）。每处只建 verdict 点
+    #   所在的过水段 + 两端各一节引桥坡（坡长=端头 OSM 段长，FB 同规则）；车行桥面 3.0m/
+    #   厚 1.9m（跨河基值），步行桥面 2.0m/厚 0.8m（人行跨河基值）；宽取 road-widths-v1 或等级 fallback。
+    # 桥面投影格网（100m）：供河岸栏杆桥处抠洞（落入桥面投影的栏杆段/立柱去掉）。
+    def _elev_vh(_oid, _ev, _lp):
+        _bvh = _ev.get("vertex_heights_m")
+        if _bvh and len(_bvh) == len(_lp):
+            return [float(v) for v in _bvh]
+        return vertex_heights(_lp, _ev["start_h"], _ev["end_h"])
+    _fbdeck_segs = []   # (a, b, ha, hb, hw2, thick, lay)
+    _fb_n = {"ways": 0, "segs": 0, "in_elev_skipped": 0, "vh_mismatch": 0}
+    for _d in _fbdecks.get("decks", []):
+        if not _d.get("in_six"):
+            continue
+        _oid = _d["osm_id"]
+        if _oid in elev_info:
+            _fb_n["in_elev_skipped"] += 1
+            continue
+        _pf = _d.get("points_lonlat") or []
+        _pts = [lonlat_to_m(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+        _vh = _d.get("vertex_heights_m") or []
+        if len(_pts) < 2 or len(_vh) != len(_pts):
+            _fb_n["vh_mismatch"] += 1
+            continue
+        _hw2 = float(_d["width_m"]) / 2.0
+        _thick = float(_d.get("thickness_m", 1.9))
+        _lay = _d.get("layer")
+        for i in range(len(_pts)-1):
+            _fbdeck_segs.append((_pts[i], _pts[i+1], float(_vh[i]), float(_vh[i+1]), _hw2, _thick, _lay))
+        _fb_n["ways"] += 1
+        _fb_n["segs"] += len(_pts)-1
+    print(f"FB decks precomputed: {_fb_n}")
+    # 过水补桥
+    _XCROSS_IDS = set()
+    _xcross_decks = []   # (a, b, ha, hb, hw2, thick, lay)
+    _xcross_piers = []   # (x, z, deck_h, thick)
+    _xc_n = {"built": 0, "road_missing": 0, "no_water_run": 0, "runs": 0, "segs": 0, "piers": 0}
+    for _xc in (_xcross if isinstance(_xcross, list) else []):
+        if _xc.get("verdict") != "B":
+            continue
+        _oid = _xc.get("road_osm_id")
+        _r = _roads_by_id.get(_oid)
+        if _r is None:
+            _xc_n["road_missing"] += 1
+            continue
+        _pf = _r.get("points_flat") or []
+        _pts = [lonlat_to_m(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+        if len(_pts) < 2:
+            _xc_n["road_missing"] += 1
+            continue
+        # 2026-11-27 D3 fix: 以段-水面交叠长度（>0.5m）定过水段，不用中点测试——
+        # 长段斜跨窄河时中点落在水外，旧法漏掉 7 处（0004/0007/0009/0017/0019/0049/0051）。
+        # 一条路可有多段过水（如 0053 过水库两臂），全部建桥。
+        _runs = []
+        _cur = None
+        for i in range(len(_pts)-1):
+            if _seg_water_len(_pts[i], _pts[i+1]) > 0.5:
+                if _cur is None:
+                    _cur = [i, i]
+                else:
+                    _cur[1] = i
+            else:
+                if _cur is not None:
+                    _runs.append(tuple(_cur)); _cur = None
+        if _cur is not None:
+            _runs.append(tuple(_cur))
+        if not _runs:
+            _xc_n["no_water_run"] += 1
+            continue
+        _hw = _r.get("highway")
+        if _hw in ("footway", "cycleway", "steps", "path", "pedestrian"):
+            _dh, _thick = 2.0, DECK_THICK_FOOT
+        else:
+            _dh, _thick = 3.0, DECK_THICK_VEH
+        _w = width_by_id.get(_oid)
+        _hw2 = _w[0]/2.0 if _w else DECK_FALLBACK_HALF.get(_hw, 4.5)
+        _lay = _r.get("layer")
+        for (_lo, _hi) in _runs:
+            _seg_h = {i: (_dh, _dh) for i in range(_lo, _hi+1)}
+            if _lo > 0:
+                _seg_h[_lo-1] = (0.0, _dh)
+            elif _hi > _lo:
+                _seg_h[_lo] = (0.0, _dh)  # 过水段顶到路头：首段自做上坡
+            if _hi < len(_pts)-2:
+                _seg_h[_hi+1] = (_dh, 0.0)
+            elif _hi > _lo:
+                _seg_h[_hi] = (_dh, 0.0)  # 过水段顶到路尾：末段自做下坡
+            for i in sorted(_seg_h):
+                _xcross_decks.append((_pts[i], _pts[i+1], _seg_h[i][0], _seg_h[i][1], _hw2, _thick, _lay))
+                _xc_n["segs"] += 1
+            _xc_n["runs"] += 1
+            if _dh > 2.0:
+                _run = _pts[_lo:_hi+2]
+                _tot = 0.0
+                _cum = [0.0]
+                for i in range(1, len(_run)):
+                    _tot += math.hypot(_run[i][0]-_run[i-1][0], _run[i][1]-_run[i-1][1])
+                    _cum.append(_tot)
+                _d = 30.0
+                while _d < _tot:
+                    _j = next(i for i in range(1, len(_cum)) if _cum[i] >= _d)
+                    _f = (_d-_cum[_j-1])/max(_cum[_j]-_cum[_j-1], 1e-9)
+                    _px = _run[_j-1][0]+(_run[_j][0]-_run[_j-1][0])*_f
+                    _pz = _run[_j-1][1]+(_run[_j][1]-_run[_j-1][1])*_f
+                    _xcross_piers.append((_px, _pz, _dh, _thick))
+                    _xc_n["piers"] += 1
+                    _d += 30.0
+        _XCROSS_IDS.add(_oid)
+        _xc_n["built"] += 1
+    print(f"water-crossing bridges (B=23): {_xc_n}")
+    # 桥面投影格网（elev + FB + 过水补桥；只含 max(ha,hb)>0.05 的段）
+    _deck_grid = {}
+    def _deck_grid_add(_ax, _az, _bx, _bz, _hw2):
+        _x0 = int(min(_ax, _bx)-_hw2)//100; _x1 = int(max(_ax, _bx)+_hw2)//100
+        _z0 = int(min(_az, _bz)-_hw2)//100; _z1 = int(max(_az, _bz)+_hw2)//100
+        for _cx in range(_x0, _x1+1):
+            for _cz in range(_z0, _z1+1):
+                _deck_grid.setdefault((_cx, _cz), []).append((_ax, _az, _bx, _bz, _hw2))
+    def _deck_hit(_x, _z):
+        for (_ax, _az, _bx, _bz, _hw2) in _deck_grid.get((int(_x)//100, int(_z)//100), []):
+            _dx, _dz = _bx-_ax, _bz-_az
+            _l2 = _dx*_dx+_dz*_dz
+            _t = 0.0 if _l2 == 0 else max(0.0, min(1.0, ((_x-_ax)*_dx+(_z-_az)*_dz)/_l2))
+            if ((_x-(_ax+_t*_dx))**2+(_z-(_az+_t*_dz))**2)**0.5 < _hw2:
+                return True
+        return False
+    _grid_n = 0
+    for _oid, _ev in elev_info.items():
+        _r = _roads_by_id[_oid]
+        _lp = way_pts(_r)
+        _vh = _elev_vh(_oid, _ev, _lp)
+        _pts = [lonlat_to_m(lon, lat) for lon, lat in _lp]
+        _w = width_by_id.get(_oid)
+        _hw2 = _w[0]/2.0 if _w else DECK_FALLBACK_HALF.get(_ev["highway"], 4.5)
+        for i in range(len(_pts)-1):
+            if max(_vh[i], _vh[i+1]) > 0.05:
+                _deck_grid_add(_pts[i][0], _pts[i][1], _pts[i+1][0], _pts[i+1][1], _hw2)
+                _grid_n += 1
+    for (_a, _b, _ha, _hb, _hw2, _thick, _lay) in _fbdeck_segs + _xcross_decks:
+        if max(_ha, _hb) > 0.05:
+            _deck_grid_add(_a[0], _a[1], _b[0], _b[1], _hw2)
+            _grid_n += 1
+    print(f"deck projection grid: {_grid_n} segments in {len(_deck_grid)} cells")
+    # BRT 站台：站台跟所在段桥面高（snap 点最近段插值），不在 elev 里则落地面
+    _brt_platforms = []   # (x, z, deck_h, heading_deg)
+    _brt_n = {"built": 0, "ground": 0, "way_missing": 0}
+    for _st in _brt.get("stations", []):
+        _oid = _st.get("brt_osm_id")
+        _r = _roads_by_id.get(_oid)
+        if _r is None:
+            _brt_n["way_missing"] += 1
+            continue
+        _sx, _sz = float(_st.get("snap_x", _st["x"])), float(_st.get("snap_z", _st["z"]))
+        _lp = way_pts(_r)
+        _pts = [lonlat_to_m(lon, lat) for lon, lat in _lp]
+        _best, _bd = 0, 1e18
+        for i in range(len(_pts)-1):
+            _mx, _mz = (_pts[i][0]+_pts[i+1][0])/2, (_pts[i][1]+_pts[i+1][1])/2
+            _dd = (_mx-_sx)**2+(_mz-_sz)**2
+            if _dd < _bd:
+                _bd, _best = _dd, i
+        _dx, _dz = _pts[_best+1][0]-_pts[_best][0], _pts[_best+1][1]-_pts[_best][1]
+        _hd = math.degrees(math.atan2(_dz, _dx))
+        _ev = elev_info.get(_oid)
+        if _ev is None:
+            _dh = 0.0
+            _brt_n["ground"] += 1
+        else:
+            _vh = _elev_vh(_oid, _ev, _lp)
+            _seglen = math.hypot(_dx, _dz) or 1.0
+            _t = max(0.0, min(1.0, ((_sx-_pts[_best][0])*_dx+(_sz-_pts[_best][1])*_dz)/(_seglen*_seglen)))
+            _dh = _vh[_best]+(_vh[_best+1]-_vh[_best])*_t
+        _brt_platforms.append((_sx, _sz, float(_dh), float(_hd)))
+        _brt_n["built"] += 1
+    print(f"BRT platforms: {_brt_n}")
     # 硬约束（楼高调查定稿）：建筑直接读楼高文件（轮廓+高度同一记录），没有任何 join。
     # 绝对不许按数组下标把 v2 高度往骨文件（63,160 栋）或其他几何上贴——下标错位
     # （骨 idx 100 = v2 idx 426），圈外 21,405 栋会全错位；如需贴合，一律按轮廓匹配。
@@ -1091,13 +1493,19 @@ def main():
         if _in6(x, z):
             return chunks.setdefault(chunk_key(x, z), new_chunk())
         return new_chunk()
+    _plaza_excl_n = 0
     for b in buildings:
         ring = clean_ring(b["p"])
         if len(ring) < 3: continue
+        if _corr_fp(ring) in _PLAZA_EXCLUDE_FP:
+            _plaza_excl_n += 1
+            continue  # 2026-11-27 D3 广场圆环：烘焙时排除 3 栋冲突楼（广场层取而代之）
         cx = sum(p[0] for p in ring)/len(ring); cz = sum(p[1] for p in ring)/len(ring)
         ck(cx, cz)["b"].append(b)
+    print(f"plaza bake exclusions: {_plaza_excl_n} buildings skipped (expect 3: flower / Ø37m platform / amphitheatre centre)")
     # 全部道路 75,937 条：画线（无宽度）；bridge!=None（且不是 bridge='no'）的走桥梁层，
     # 避免重复画；高架路（elev_info）由高架循环按高程画，不在这里画平线
+    _road_skip_n = 0   # 2026-11-27 D3：过水补桥段跳过的地面线段数
     for r in roads_all["roads"]:
         if r.get("bridge") not in (None, "no"):
             continue
@@ -1119,6 +1527,9 @@ def main():
         rgb = C_ROAD_MAJOR if hw in ROAD_MAJOR else (C_ROAD_FOOT if hw in ROAD_FOOT else C_ROAD_MINOR)
         for i in range(len(pts)-1):
             mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
+            if r["osm_id"] in _XCROSS_IDS and _seg_water_len(pts[i], pts[i+1]) > 0.5:
+                _road_skip_n += 1
+                continue  # 2026-11-27 D3 过水补桥段：地面线不画（桥面另建），只留两端引桥坡外的地面路
             ck(mx, mz)["roads"].append((pts[i], pts[i+1], rgb))
         # v3: 车行道按 road-widths-v1 画带宽面（high 层）；步行道仍画线
         _w = width_by_id.get(r["osm_id"])
@@ -1126,7 +1537,10 @@ def main():
             _hw2 = _w[0] / 2.0
             for i in range(len(pts)-1):
                 mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
+                if r["osm_id"] in _XCROSS_IDS and _seg_water_len(pts[i], pts[i+1]) > 0.5:
+                    continue  # 过水补桥段：地面带面不画
                 ck(mx, mz)["road_ribbons"].append((pts[i], pts[i+1], _hw2, rgb))
+    print(f"roads: ground segments skipped for water-crossing bridges: {_road_skip_n}")
     # v3: 绿道（路名含“绿道”的全部 155 条，含高空栈道桥段）画 4m 绿带
     for r in roads_all["roads"]:
         if r.get("tunnel") == "yes":
@@ -1179,6 +1593,19 @@ def main():
             ck(_p[0], _p[1])["tunnel_portals"].append((_p[0], _p[1], _hd, _half, _r.get("name") or "", _wsrc))
             _portal_n += 1
     print(f"tunnel portals (vehicle, to-surface, in six districts): {_portal_n}")
+    # ---- 2026-11-27 D3 非车行洞口（tunnel-portals-nonvehicle-v1.json，to-surface 口径 235 个） ----
+    # 与车行框同款 C_PORTAL 尺寸（写块循环共用 tunnel_portals 渲染）；挂起的 83 个不建：
+    # 72 个 building_passage 不算隧道、10 个中段节点、1 个六区外。
+    _portal_nv = 0
+    for _np in _nportals.get("portals", []):
+        _x, _z = float(_np["x_m"]), float(_np["z_m"])
+        if not _in6(_x, _z):
+            continue
+        ck(_x, _z)["tunnel_portals"].append((_x, _z, float(_np["heading_deg"]),
+                                            float(_np["half_width_m"]), _np.get("name") or "",
+                                            _np.get("width_source") or "file"))
+        _portal_nv += 1
+    print(f"tunnel portals (non-vehicle, to-surface, in six districts): {_portal_nv} (total frames {_portal_n + _portal_nv})")
     # v3: 水用 batch1 water-v1（线 4,089 + 面 1,891）+ 11 条湖记录（9 个湖名）已拼 multipolygon；
     # 大湖面片与水面按分块裁剪入块；落在湖面片内的 water 面片去重
     if water_v1.get("water_lines") or water_v1.get("water_polys"):
@@ -1240,16 +1667,23 @@ def main():
         # 元组 (a, b, kind)：kind 0 = 顶梁段，kind 1 = 立柱（a == b 的 xz）。
         # 1.1m 高、10m 间距为示意尺寸，非实测；边界取自 OSM 原值。
         # canal/stream/drain/ditch 不做栏杆（多为沟渠）；桥跨处未抠洞（已知局限，见报告）。
+        _rail_cut = {"segs": 0, "posts": 0}   # 2026-11-27 D3：桥处抠洞（落入桥面投影的栏杆段/立柱去掉）
         def _rail_ring(_ringm):
             for i in range(len(_ringm)):
                 a = _ringm[i]; b = _ringm[(i+1) % len(_ringm)]
                 mx, mz = (a[0]+b[0])/2, (a[1]+b[1])/2
-                ck(mx, mz)["river_rails"].append((a, b, 0))
+                if _deck_hit(mx, mz):
+                    _rail_cut["segs"] += 1   # 栏杆段落入桥面投影：抠掉
+                else:
+                    ck(mx, mz)["river_rails"].append((a, b, 0))
                 _el = math.hypot(b[0]-a[0], b[1]-a[1])
                 _npost = int(_el // 10.0)
                 for _k in range(1, _npost+1):
                     _t = _k*10.0/_el
                     _px = a[0]+(b[0]-a[0])*_t; _pz = a[1]+(b[1]-a[1])*_t
+                    if _deck_hit(_px, _pz):
+                        _rail_cut["posts"] += 1
+                        continue
                     ck(_px, _pz)["river_rails"].append(((_px, _pz), (_px, _pz), 1))
         _rail_n = 0
         for _wp in water_v1.get("water_polys", []):
@@ -1265,7 +1699,8 @@ def main():
             _ringm = [lonlat_to_m(lon, lat) for lon, lat in _outer["points"]]
             if not any(_in6(x, z) for x, z in _ringm): continue
             _rail_ring(_ringm); _rail_n += 1
-        print(f"river rails: {_rail_n} water boundaries (river polys + lake outer rings in six districts)")
+        print(f"river rails: {_rail_n} water boundaries (river polys + lake outer rings in six districts); "
+              f"cut at bridge decks: {_rail_cut['segs']} rail segs, {_rail_cut['posts']} posts")
         for _wl in water_v1.get("water_lines", []):
             _pts = [lonlat_to_m(lon, lat) for lon, lat in (_wl.get("points") or [])]
             for i in range(len(_pts)-1):
@@ -1284,8 +1719,14 @@ def main():
     # 桥梁 9,399：不在 elev_info 里的画平线（铁路高架等不在 roads 文件里的路仍走平，
     # 只做形状线）；在 elev_info 里的由高架循环按高程画，不在这里重复画平线。
     # 2026-11-25 零平桥后全部 9,399 座均有数值桥面高（推算值标方法与误差），§7.10 留平规则已退役。
+    # 2026-11-27 D3 FB 平桥：bridge-fb-decks-v1.json 里的 377 条六区内 way 改实心桥面，
+    # 这里不再画地面+0.3m 平线（否则桥面上下两条线重叠）；8 条 layer=0 地面桥（held）仍画平线。
+    _fb_deck_ids = {_d["osm_id"] for _d in _fbdecks.get("decks", []) if _d.get("in_six")}
+    _flat_skip = 0
     for b in bridges["bridges"]:
-        if b["osm_id"] in elev_info:
+        if b["osm_id"] in elev_info or b["osm_id"] in _fb_deck_ids:
+            if b["osm_id"] in _fb_deck_ids:
+                _flat_skip += 1
             continue
         pf = b["points_flat"]
         pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
@@ -1293,13 +1734,16 @@ def main():
             mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
             ck(mx, mz)["bridges"].append((pts[i], pts[i+1]))
     for b in bridges["footbridges"]:
-        if b["osm_id"] in elev_info:
+        if b["osm_id"] in elev_info or b["osm_id"] in _fb_deck_ids:
+            if b["osm_id"] in _fb_deck_ids:
+                _flat_skip += 1
             continue
         pf = b["points_flat"]
         pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
         for i in range(len(pts)-1):
             mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
             ck(mx, mz)["footbridges"].append((pts[i], pts[i+1]))
+    print(f"flat bridge lines skipped for FB solid decks: {_flat_skip} ways")
     # 地铁线路：按 ref 去重取第一条方向，画线（无线宽）
     seen_ref = set()
     for ln in metro["lines"]:
@@ -1343,8 +1787,8 @@ def main():
         print(f"metro entrances estimated v1: {_est_in} of {_est_n} inside six districts (all method=推算, 未核对)", flush=True)
     except Exception as _e:
         print(f"WARN metro entrances estimated v1 not loaded: {_e!r}", flush=True)
-    # ---- v3.2 第 17 项：地铁站厅/站台（365 站；3 unknown 站跳过，不编）----
-    # 尺寸除 OSM 站台轮廓外均为推测（数据文件逐项标注）。OSM 站 23 座：
+    # ---- v3.2 第 17 项：地铁站厅/站台（369 站；3 unknown 站跳过，不编）----
+    # 尺寸除 OSM 站台轮廓外均为推测（数据文件逐项标注）。OSM 站 24 座（2026-11-27 D3 补升仙湖站）：
     # 多条 platform way 轮廓用凸包合并为一站台环（逐条轮廓见源数据）；
     # fallback 站 345 座：站台 120x12m 矩形，走向 = 最近线路段方向角。
     # 站厅 = 站台环外扩 8m。地下站台顶 -12m / 站厅 -6.0 至 -1.5m；
@@ -1396,7 +1840,39 @@ def main():
         cx, cz = lonlat_to_m(*cp["centroid"])
         ck(cx, cz)["compounds"].append(cp)
     # 铁路（PBF 实抽）：画线；隧道段（subway tunnel=yes）同层、颜色同 subway
+    # 2026-11-27 D3 铁路：tunnel=yes/building_passage 的段跳过不画（与车行隧道排除地面画法同规矩）；
+    # 隧道中心线格网供 natrail 反查去重（national-rail-v1.json 无 tunnel 标签）。
+    _rail_tunnel_ids = set()
+    _rail_tunnel_grid = {}
+    _rail_skip = {"ways": 0, "km": 0.0}
     for w in railway["ways"]:
+        if w.get("tunnel") not in ("yes", "building_passage"):
+            continue
+        _rail_tunnel_ids.add(w["osm_id"])
+        _pf = w.get("points_flat") or []
+        _pts = [lonlat_to_m(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+        for i in range(len(_pts)-1):
+            _x0 = int(min(_pts[i][0], _pts[i+1][0])-20)//100; _x1 = int(max(_pts[i][0], _pts[i+1][0])+20)//100
+            _z0 = int(min(_pts[i][1], _pts[i+1][1])-20)//100; _z1 = int(max(_pts[i][1], _pts[i+1][1])+20)//100
+            for _cx in range(_x0, _x1+1):
+                for _cz in range(_z0, _z1+1):
+                    _rail_tunnel_grid.setdefault((_cx, _cz), []).append((_pts[i], _pts[i+1]))
+    def _rail_tunnel_hit(_x, _z, _r=20.0):
+        for (_a, _b) in _rail_tunnel_grid.get((int(_x)//100, int(_z)//100), []):
+            _dx, _dz = _b[0]-_a[0], _b[1]-_a[1]
+            _l2 = _dx*_dx+_dz*_dz
+            _t = 0.0 if _l2 == 0 else max(0.0, min(1.0, ((_x-_a[0])*_dx+(_z-_a[1])*_dz)/_l2))
+            if ((_x-(_a[0]+_t*_dx))**2+(_z-(_a[1]+_t*_dz))**2)**0.5 <= _r:
+                return True
+        return False
+    for w in railway["ways"]:
+        if w.get("tunnel") in ("yes", "building_passage"):
+            _rail_skip["ways"] += 1
+            _pf = w.get("points_flat") or []
+            _pts = [lonlat_to_m(_pf[i], _pf[i+1]) for i in range(0, len(_pf)-1, 2)]
+            for i in range(len(_pts)-1):
+                _rail_skip["km"] += math.hypot(_pts[i+1][0]-_pts[i][0], _pts[i+1][1]-_pts[i][1])/1000.0
+            continue
         pf = w["points_flat"]
         pts = [lonlat_to_m(pf[i], pf[i+1]) for i in range(0, len(pf)-1, 2)]
         if len(pts) < 2: continue
@@ -1404,7 +1880,10 @@ def main():
         for i in range(len(pts)-1):
             mx, mz = (pts[i][0]+pts[i+1][0])/2, (pts[i][1]+pts[i+1][1])/2
             ck(mx, mz)["railway"].append((pts[i], pts[i+1], rgb))
+    print(f"railway tunnel segments skipped: {_rail_skip['ways']} ways, {_rail_skip['km']:.2f} km")
     # ---- v3: 地面用地 15,164 面（按类别画地面色块；简化到 ≤64 点；<200m² 跳过；洞忽略） ----
+    # 2026-11-27 D3 广场圆环 ground_cut：与 R75 圆盘相交的 landuse 面先减去圆盘再分桶（圆盘地面由广场层提供，不留双层地面）
+    _pz_cut_n = 0
     for _f in landuse.get("features", []):
         _pts = _f.get("points") or []
         if len(_pts) < 3: continue
@@ -1413,9 +1892,40 @@ def main():
         if len(_ring) > 64:
             _step = len(_ring) / 64.0
             _ring = [_ring[int(i*_step)] for i in range(64)]
+        if _pz_disc is not None:
+            try:
+                _lp = _ShpPolygon(_ring)
+                _hit = _lp.is_valid and _pz_disc_prep.intersects(_lp)
+            except Exception:
+                _hit = False
+            if _hit:
+                try:
+                    _diff = _lp.difference(_pz_disc)
+                except Exception:
+                    _diff = None
+                if _diff is None or _diff.is_empty:
+                    continue
+                if _diff.geom_type == "Polygon":
+                    _parts = [_diff]
+                elif _diff.geom_type == "MultiPolygon":
+                    _parts = list(_diff.geoms)
+                else:  # GeometryCollection：只取其中多边形部分并记一笔（洞按既有“洞忽略”口径，不静默丢）
+                    _parts = [g for g in getattr(_diff, "geoms", []) if g.geom_type == "Polygon"]
+                    print(f"WARN plaza landuse cut: GeometryCollection, kept {len(_parts)} polygon parts")
+                for _pp in _parts:
+                    if _pp.is_empty or _pp.area < 200: continue
+                    bucket_poly(chunks, [[float(a), float(b)] for a, b in _pp.exterior.coords],
+                                LU_COLOR.get(_f.get("category"), [0.85, 0.85, 0.85]), "landuse")
+                _pz_cut_n += 1
+                continue
         bucket_poly(chunks, _ring, LU_COLOR.get(_f.get("category"), [0.85, 0.85, 0.85]), "landuse")
+    print(f"plaza landuse cut: {_pz_cut_n} faces cut by R75 disc")
     # ---- v3: 国铁（24,438 线 / 530 站）按模型范围过滤 ----
+    _nt_skip = {"lines_by_id": 0, "segs_by_proximity": 0}
     for _rl in natrail.get("rail_lines", []):
+        if _rl.get("osm_id") in _rail_tunnel_ids:
+            _nt_skip["lines_by_id"] += 1
+            continue  # 整条 way 在 railway-v1 里标 tunnel：全是隧道，不画
         _rpts = _rl.get("points") or []
         _pts = [lonlat_to_m(lon, lat) for lon, lat in _rpts]
         for i in range(len(_pts)-1):
@@ -1424,7 +1934,11 @@ def main():
             if not (MODEL_LON[0] <= _mlon <= MODEL_LON[1] and MODEL_LAT[0] <= _mlat <= MODEL_LAT[1]):
                 continue
             mx, mz = (_pts[i][0]+_pts[i+1][0])/2, (_pts[i][1]+_pts[i+1][1])/2
+            if _rail_tunnel_hit(mx, mz):
+                _nt_skip["segs_by_proximity"] += 1
+                continue  # 段中点 20m 内有铁路隧道中心线：隧道细线不画
             ck(mx, mz)["natrail"].append((_pts[i], _pts[i+1]))
+    print(f"natrail tunnel segments skipped: {_nt_skip}")
     for _st in natrail.get("stations", []):
         if _st.get("lon") is None or _st.get("lat") is None: continue
         if not (MODEL_LON[0] <= _st["lon"] <= MODEL_LON[1] and MODEL_LAT[0] <= _st["lat"] <= MODEL_LAT[1]):
@@ -1440,7 +1954,7 @@ def main():
             continue
         for _lp in _lamps:
             _x, _z = float(_lp["x"]), float(_lp["y"])
-            _h = 9.12 if _lp.get("style", 0) == 0 else 8.05
+            _h = lamp_height(_lp)   # 2026-11-27 D3：新 tiles 自带 h（12/10/8/6m），无 h 回落 style
             ck(_x, _z)["lamps"].append((_x, _z, _h))
             _lamp_n += 1
     print(f"lamps bucketed: {_lamp_n}")
@@ -1460,7 +1974,7 @@ def main():
             _x, _z = float(_lp["x"]), float(_lp["y"])
             if _lp.get("kind") == "bridge_pole":
                 ck(_x, _z)["lamps_bridge"].append(
-                    (_x, _z, 9.12 if _lp.get("style", 0) == 0 else 8.05,
+                    (_x, _z, lamp_height(_lp),   # 2026-11-27 D3：桥灯无 h，按 hw 查表（与城灯同表）
                      float(_lp["base_y_m"])))
                 _bt_n["bridge"] += 1
             else:
@@ -1770,7 +2284,7 @@ def main():
         lp = way_pts(r)
         if len(lp) < 2:
             continue
-        vh = vertex_heights(lp, ev["start_h"], ev["end_h"])
+        vh = _elev_vh(oid, ev, lp)   # 2026-11-27 D3：overrides 烤好的顶点高优先，缺省沿路长插值
         pts = [lonlat_to_m(lon, lat) for lon, lat in lp]
         hw = ev["highway"]
         if hw in ("footway", "cycleway", "steps", "path", "pedestrian"):
@@ -1800,6 +2314,8 @@ def main():
             else:
                 _deck_w_fallback += 1
         # 桥墩：沿路长每 30m 一根（高度>2m 的区段），地面→桥面
+        # 2026-11-27 D3：普通墩改走 bridge-piers-v1.json（墩位已分类：路边/空地/水里/
+        # 隔离带/挪人行道/一跨过去掉）；此处只保留 V 墩与红牌楼牌坊缺口（文件里已排除这两类）。
         if total > 0:
             d = 30.0
             while d < total:
@@ -1815,10 +2331,267 @@ def main():
                         ck(px, pz)["vpiers"].append((px, pz, ph, _tx/_tl, _tz/_tl))
                     elif oid in RING_WAY_IDS and PAIFANG_LOC and math.hypot(px-PAIFANG_LOC[0], pz-PAIFANG_LOC[1]) < 33.08:
                         pass  # 红牌楼牌坊处 66.16m 桥墩空缺（公开记录最长单跨）
-                    else:
-                        ck(px, pz)["piers"].append((px, pz, ph, _thick))
+                    # else：普通墩由 bridge-piers-v1.json 提供，不在这里重复建
                 d += 30.0
     print(f"deck widths: file { _deck_w_file} segs, fallback { _deck_w_fallback} segs")
+    # ---- 2026-11-27 D3：FB 实心桥面 + 过水补桥 + 桥墩文件 + 护栏 + 天桥楼梯 + BRT + 公园 ----
+    # FB/过水补桥段进 elev 键（与 §7.14 同款元组：写块循环画实心桥面 + 线；两端高 ≤0.05m 的段只留线）。
+    _fb_buck_n = 0; _fb_buck_fb = 0; _fb_buck_xc = 0
+    for _idx, (_a, _b, _ha, _hb, _hw2, _thick, _lay) in enumerate(_fbdeck_segs + _xcross_decks):
+        _mx, _mz = (_a[0]+_b[0])/2, (_a[1]+_b[1])/2
+        if not _in6(_mx, _mz):
+            continue  # 区外段进丢弃槽，不计数
+        ck(_mx, _mz)["elev"].append((_a, _b, _ha, _hb, C_BRIDGE, False, _hw2, _thick, _lay))
+        _fb_buck_n += 1
+        if _idx < len(_fbdeck_segs):
+            _fb_buck_fb += 1
+        else:
+            _fb_buck_xc += 1
+    print(f"FB + crossing deck segs bucketed into elev: {_fb_buck_n} (FB {_fb_buck_fb} in-six of {len(_fbdeck_segs)}, crossing {_fb_buck_xc} of {len(_xcross_decks)})")
+    # 桥墩（bridge-piers-v1.json）：shift_to_sidewalk 用移位坐标；drop_span_over 不建；
+    # V 墩 9 站 + 牌坊缺口 4 站不在文件里（上文内联逻辑已处理，不重复建）。
+    _pier_n = {"built": 0, "shifted": 0, "dropped": 0}
+    for _p in _bpiers.get("piers", []):
+        if _p.get("action") == "drop_span_over":
+            _pier_n["dropped"] += 1
+            continue
+        if _p.get("action") == "shift_to_sidewalk":
+            _x, _z = float(_p["shifted_x_m"]), float(_p["shifted_z_m"])
+            _pier_n["shifted"] += 1
+        else:
+            _x, _z = float(_p["x_m"]), float(_p["z_m"])
+        ck(_x, _z)["piers"].append((_x, _z, float(_p["deck_h_m"]), float(_p.get("thick_m", 1.9))))
+        _pier_n["built"] += 1
+    for (_x, _z, _h, _thick) in _xcross_piers:
+        ck(_x, _z)["piers"].append((_x, _z, _h, _thick))
+    print(f"piers from file: {_pier_n}; crossing piers: {len(_xcross_piers)}")
+    # 高架护栏（bridge-guardrails-v1.json）：每条 run 按段入块（与全码线要素同规则），
+    # 元组 ((x1,z1,deck_h1),(x2,z2,deck_h2))；写块时 y = 地面 + deck_h + 1.1m。
+    _gr_n = {"runs": 0, "segs": 0}
+    for _g in _brails.get("guardrails", []):
+        _pts = _g.get("pts", [])
+        if len(_pts) < 2:
+            continue
+        _gr_n["runs"] += 1
+        for i in range(len(_pts)-1):
+            _a, _b = _pts[i], _pts[i+1]
+            _mx, _mz = (_a[0]+_b[0])/2, (_a[1]+_b[1])/2
+            ck(_mx, _mz)["guardrails"].append(((float(_a[0]), float(_a[1]), float(_a[2])),
+                                               (float(_b[0]), float(_b[1]), float(_b[2]))))
+            _gr_n["segs"] += 1
+    print(f"guardrails bucketed: {_gr_n}")
+    # 人行天桥楼梯/坡道（bridge-footbridge-stairs-v1.json）：stair_needed 的端头才建
+    _stair_n = 0
+    for _fb in _bstairs.get("footbridges", []):
+        for _e in _fb.get("ends", []):
+            if not _e.get("stair_needed"):
+                continue
+            ck(float(_e["x_m"]), float(_e["z_m"]))["foot_stairs"].append(
+                (float(_e["x_m"]), float(_e["z_m"]), float(_e["deck_h_m"]),
+                 float(_e["heading_out_deg"]), float(_e["run_m"]), float(_e["width_m"])))
+            _stair_n += 1
+    print(f"footbridge stairs bucketed: {_stair_n}")
+    # BRT 站台（brt-stations-v1.json）：24x3m 板 + 雨棚 + 栏杆（示意尺寸），跟所在段桥面高
+    for (_sx, _sz, _dh, _hd) in _brt_platforms:
+        ck(_sx, _sz)["brt_platforms"].append((_sx, _sz, _dh, _hd))
+    print(f"BRT platforms bucketed: {len(_brt_platforms)}")
+    # ---- 2026-11-27 D3 公园精细（six-parks-v1.json + park-amenities-v1.json；4 名园） ----
+    # 园路：3,310 runs（已裁到六区）按 footway/path 画 1.5m 半宽窄带（写块循环 park_paths）。
+    # 园内水/园内建筑已在通用水/楼循环里画（本文件只审计计数，不重复画）。
+    _pp_n = 0
+    for _run in _parks.get("paths", []):
+        _pts = _run.get("pts_m") or []
+        for i in range(len(_pts)-1):
+            _a, _b = _pts[i], _pts[i+1]
+            _mx, _mz = (_a[0]+_b[0])/2, (_a[1]+_b[1])/2
+            ck(_mx, _mz)["park_paths"].append((_a, _b, 1.5, C_ROAD_FOOT))
+            _pp_n += 1
+    # 公园小品：厕所 3x2x2.5m、kiosk 2.5x2x2.5m（示意尺寸）；亭子：环 + 柱 + 顶（示意 2.4m 柱 + 0.3m 顶）。
+    _pa_n = {"toilet": 0, "kiosk": 0, "pavilion": 0}
+    for _it in _pamen.get("items", []):
+        _k = _it.get("kind")
+        _x, _z = float(_it["x"]), float(_it["z"])
+        if _k in ("toilet", "kiosk"):
+            ck(_x, _z)["park_amenities"].append((_x, _z, _k))
+            _pa_n[_k] += 1
+        elif _k in ("pavilion", "pavilion_roof", "pavilion_shelter"):
+            _ring = _it.get("ring")
+            if not _ring:
+                _ring = [[_x-2, _z-2], [_x+2, _z-2], [_x+2, _z+2], [_x-2, _z+2]]   # 节点亭默认 4x4m
+            ck(_x, _z)["park_pavilions"].append(([[float(a), float(b)] for a, b in _ring], _k))
+            _pa_n["pavilion"] += 1
+    print(f"park paths bucketed: {_pp_n} segs; park amenities: {_pa_n}")
+    # 名园密种树（six-parks-v1.json trees.named_parks，20m 采样；树高沿用哈希估算 4-8m）
+    _pt_n = 0
+    for _pk, _td in (_parks.get("trees", {}) or {}).get("named_parks", {}).items():
+        for (_tx, _tz) in _td.get("points", []):
+            _hh = 4 + ((int(_tx*7) ^ int(_tz*13)) % 5)
+            _ww = 2.0 + (((int(_tx*3) ^ int(_tz*11)) % 3) * 0.5)
+            _sh = _TREE_SHADES[(int(_tx)+int(_tz)) % 3]
+            ck(_tx, _tz)["trees"].append((_tx, _tz, float(_hh), _ww, _sh))
+            _pt_n += 1
+    print(f"named-park dense trees bucketed: {_pt_n}")
+    # 园内 OSM 单木 71（six-parks trees.osm_trees_in_parks，实测位置；树高沿用哈希估算 4-8m）
+    _ot_n = 0
+    for _ot in (_parks.get("trees", {}) or {}).get("osm_trees_in_parks", []):
+        _tx, _tz = float(_ot["x"]), float(_ot["z"])
+        _hh = 4 + ((int(_tx*7) ^ int(_tz*13)) % 5)
+        _ww = 2.0 + (((int(_tx*3) ^ int(_tz*11)) % 3) * 0.5)
+        _sh = _TREE_SHADES[(int(_tx)+int(_tz)) % 3]
+        ck(_tx, _tz)["trees"].append((_tx, _tz, float(_hh), _ww, _sh))
+        _ot_n += 1
+    print(f"park OSM single trees bucketed: {_ot_n}")
+    # 健身/游乐（six-park-leisure.json，2026-11-27 Parks2 交接：D3 直接消费；OSM 31 实测 + 种子 17 示意；
+    # G04 熊猫基地 2 项无公园面、位置仅为地标中心示意，跳过不画）
+    _pl_n = {"fitness_station_osm": 0, "fitness_station_seeded": 0, "playground_osm": 0, "playground_seeded": 0, "flagged_skipped": 0}
+    for _li in _pleis.get("items", []):
+        if _li.get("flag"):
+            _pl_n["flagged_skipped"] += 1
+            continue
+        _k = _li.get("kind")
+        _src = _li.get("source", "")
+        if _k not in ("fitness_station", "playground"):
+            continue
+        ck(float(_li["x"]), float(_li["z"]))["park_leisure"].append((float(_li["x"]), float(_li["z"]), _k, _src))
+        _pl_n[f"{_k}_{'osm' if _src == 'osm' else 'seeded'}"] += 1
+    print(f"park leisure bucketed: {_pl_n}")
+    # ---- 2026-11-27 D3：星泽广场三圆（plaza-circles-v2.json，数据层；独立脚本只出验收叠加层，不进包）----
+    # 几何与 build_plaza_circles.py 同款函数、同参数；进临时 Acc 后按三角重心分桶（hi+mid 两档都进）。
+    _pz_acc = Acc(); _pz_lines = LineAcc()
+    _pz_disc_d = _plaza.get("disc", {})
+    _pz_structs = {s["id"]: s for s in _plaza.get("structures", [])}
+    _pz_kept = 0
+    if _pz_disc_d and _pz_structs:
+        _dcx, _dcz = float(_pz_disc_d["center"]["x"]), float(_pz_disc_d["center"]["z"])
+        _g_disc = ground(_dcx, _dcz)
+        _right0 = _pz_structs["right_amphitheatre"]
+        _rx0 = float(_right0["center"]["x"]); _rz0 = float(_right0["center"]["z"])
+        _pz_kept = disc_with_hole(_pz_acc, _dcx, _dcz, float(_pz_disc_d["radius_m"]),
+                                  _g_disc + float(_pz_disc_d["y_rel_ground"]),
+                                  _pz_disc_d["color"], _rx0, _rz0,
+                                  float(_right0["ring"]["radius_m"]))
+        # 圆盘竖沿 (2026-11-27 加深): 外圈 3m 宽环顶 +0.30, 外壁 + 内壁竖直
+        _rim_d = _pz_disc_d.get("rim")
+        if _rim_d:
+            annulus_top(_pz_acc, _dcx, _dcz, float(_rim_d["r_out"]), float(_rim_d["r_in"]),
+                        _g_disc + float(_rim_d["y_rel_ground"]), _rim_d["color"])
+            wall_band(_pz_acc, _dcx, _dcz, float(_rim_d["r_out"]),
+                      _g_disc + float(_rim_d["y_rel_ground"]),
+                      _g_disc + float(_pz_disc_d["y_rel_ground"]), _rim_d["color"],
+                      inward=False)
+            wall_band(_pz_acc, _dcx, _dcz, float(_rim_d["r_in"]),
+                      _g_disc + float(_rim_d["y_rel_ground"]),
+                      _g_disc + float(_pz_disc_d["y_rel_ground"]), _rim_d["color"],
+                      inward=True)
+        # 左：太阳神鸟（深色圆盘 + 基座两环 + 分层雕塑）
+        _left = _pz_structs["left_sunbird"]
+        _lx, _lz = float(_left["center"]["x"]), float(_left["center"]["z"])
+        _g_left = ground(_lx, _lz)
+        _dd = _left["dark_disc"]
+        # 2026-11-27 加深: 深盘改厚盘 (盘面 +0.06 起, 顶 +0.30), 带竖直侧壁
+        thick_disc(_pz_acc, _lx, _lz, float(_dd["radius_m"]),
+                   _g_left + float(_pz_disc_d["y_rel_ground"]),
+                   _g_left + float(_dd["y_rel_ground"]), _dd["color"])
+        _small = _left["plinth"]
+        for _key in ("outer", "inner"):
+            _part = _small[_key]
+            _ring = [list(lonlat_to_m(lon, lat)) for lon, lat in _part["points_lonlat"]]
+            if _ring[0] == _ring[-1]:
+                _ring = _ring[:-1]
+            _y0 = _g_left + float(_part["y0_rel_ground"])
+            _y1 = _g_left + float(_part["y1_rel_ground"])
+            _rgb = shade_by_height(float(_part["y1_rel_ground"]))
+            prism(_pz_acc, _ring, _y0, _y1, _rgb)
+        _sc = _left["sculpture"]
+        _scol = _sc["color"]
+        for _part in _sc["parts"]:
+            if _part["shape"] == "cylinder":
+                cylinder(_pz_acc, _lx, _lz, float(_part["radius_m"]),
+                         _g_left + float(_part["y0_rel_ground"]),
+                         _g_left + float(_part["y1_rel_ground"]), _scol)
+            elif _part["shape"] == "disc":
+                _y1 = _g_left + float(_part["y_rel_ground"])
+                thick_disc(_pz_acc, _lx, _lz, float(_part["radius_m"]),
+                           _y1 - float(_part["thickness_m"]), _y1, _scol)
+            elif _part["shape"].startswith("3 arc"):
+                _ys = _part["y_rel_ground"]
+                _span = float(_part["span_deg"])
+                _step = float(_part["rotation_step_deg"])
+                _th = float(_part["thickness_m"])
+                _r_out = float(_part.get("r_out_m", 5.5))
+                _r_in = float(_part.get("r_in_m", 4.0))
+                for _j, _y in enumerate(_ys):
+                    _a0 = _j * _step
+                    _a1 = _a0 + _span
+                    _y1 = _g_left + float(_y)
+                    arc_annulus_top(_pz_acc, _lx, _lz, _r_out, _r_in, _y1, _scol, _a0, _a1)
+                    arc_wall_band(_pz_acc, _lx, _lz, _r_out, _y1, _y1 - _th, _scol, _a0, _a1, inward=False)
+                    arc_wall_band(_pz_acc, _lx, _lz, _r_in, _y1, _y1 - _th, _scol, _a0, _a1, inward=True)
+        # 中：花盘（OSM 实测圆台 + 8 瓣花形浮雕）
+        _midf = _pz_structs["mid_flower"]
+        _mx, _mz = float(_midf["center"]["x"]), float(_midf["center"]["z"])
+        _g_mid = ground(_mx, _mz)
+        _d = _midf["disc"]
+        _ring = [list(lonlat_to_m(lon, lat)) for lon, lat in _d["points_lonlat"]]
+        if _ring[0] == _ring[-1]:
+            _ring = _ring[:-1]
+        prism(_pz_acc, _ring, _g_mid + float(_d["y0_rel_ground"]),
+              _g_mid + float(_d["y1_rel_ground"]), _d["color"])
+        _fl = _midf["flower"]
+        _fcol = _fl["color"]
+        _cd = _fl["centre_disc"]
+        cylinder(_pz_acc, _mx, _mz, float(_cd["radius_m"]),
+                 _g_mid + float(_cd["y0_rel_ground"]),
+                 _g_mid + float(_cd["y1_rel_ground"]), _fcol)
+        _pt = _fl["petals"]
+        for _k in range(int(_pt["count"])):
+            _a = 2.0 * math.pi * _k / int(_pt["count"])
+            _px = _mx + float(_pt["ring_radius_m"]) * math.cos(_a)
+            _pz = _mz + float(_pt["ring_radius_m"]) * math.sin(_a)
+            cylinder(_pz_acc, _px, _pz, float(_pt["radius_m"]),
+                     _g_mid + float(_pt["y0_rel_ground"]),
+                     _g_mid + float(_pt["y1_rel_ground"]), _fcol)
+        # 右：站环圆形剧场（外圈环 + 8 级台阶下沉 + 碗底 + 中央分层构筑）
+        _right = _pz_structs["right_amphitheatre"]
+        _rx, _rz = float(_right["center"]["x"]), float(_right["center"]["z"])
+        _g_right = ground(_rx, _rz)
+        _rim = _right["rim"]
+        annulus_top(_pz_acc, _rx, _rz, float(_rim["r_out"]), float(_rim["r_in"]),
+                    _g_right + float(_rim["y_rel_ground"]), _rim["color"])
+        for _t in _right["steps"]["treads"]:
+            _y = _g_right + float(_t["y_rel_ground"])
+            annulus_top(_pz_acc, _rx, _rz, float(_t["r_out"]), float(_t["r_in"]), _y, _t["color"])
+            _y_prev = _y + float(_right["steps"]["rise_m"])
+            wall_band(_pz_acc, _rx, _rz, float(_t["r_out"]), _y_prev, _y, _t["color"], inward=True)
+        _floor = _right["floor"]
+        disc_top(_pz_acc, _rx, _rz, float(_floor["radius_m"]),
+                 _g_right + float(_floor["y_rel_ground"]), _floor["color"])
+        _cs = _right["central_structure"]
+        for _part in _cs["parts"]:
+            cylinder(_pz_acc, _rx, _rz, float(_part["radius_m"]),
+                     _g_right + float(_part["y0_rel_ground"]),
+                     _g_right + float(_part["y1_rel_ground"]), _cs["color"])
+        # 描边线：圆盘外圈 + 站环外圈
+        _disc_pts = circle_pts(_dcx, _dcz, float(_pz_disc_d["radius_m"]), _PZ_SEG)
+        _disc_pts.append(_disc_pts[0])
+        _pz_lines.ring(_disc_pts, lambda x, z: _g_disc + 0.32, [0.45, 0.45, 0.48])
+        _ring_pts = circle_pts(_rx, _rz, float(_right["ring"]["radius_m"]), _PZ_SEG)
+        _ring_pts.append(_ring_pts[0])
+        _pz_lines.ring(_ring_pts, lambda x, z: _g_right + 0.47, [0.45, 0.45, 0.48])
+    # 按三角/线段重心分桶（圆盘跨 119_100/119_101 两块，重心定块）
+    _pz_n = 0
+    for _i in range(0, len(_pz_acc.pos), 9):
+        _a = _pz_acc.pos[_i:_i+3]; _b = _pz_acc.pos[_i+3:_i+6]; _cc = _pz_acc.pos[_i+6:_i+9]
+        _n = _pz_acc.nor[_i:_i+3]; _rgb = _pz_acc.col[_i:_i+3]
+        _mx = (_a[0]+_b[0]+_cc[0])/3.0; _mz = (_a[2]+_b[2]+_cc[2])/3.0
+        ck(_mx, _mz)["plaza_circles"].append(("tri", _a, _b, _cc, _n, _rgb))
+        _pz_n += 1
+    for _i in range(0, len(_pz_lines.pos), 6):
+        _a = _pz_lines.pos[_i:_i+3]; _b = _pz_lines.pos[_i+3:_i+6]; _rgb = _pz_lines.col[_i:_i+3]
+        _mx = (_a[0]+_b[0])/2.0; _mz = (_a[2]+_b[2])/2.0
+        ck(_mx, _mz)["plaza_circles"].append(("seg", _a, _b, _rgb))
+        _pz_n += 1
+    print(f"plaza circles bucketed: {_pz_n} tris+segs (temp Acc {_pz_acc.tris()} tris, disc grid kept {_pz_kept}/576; overlay is 6399 tris)")
     # ---- 收费站（§7.14，PBF 实抽）：亭点为示意盒，落在高架上时按桥面高落座 ----
     for p in toll["booth_points"]:
         x, z = lonlat_to_m(p["lon"], p["lat"])
@@ -2089,10 +2862,11 @@ def main():
                 y0 = ground(e["x"], e["z"])
                 box = [[e["x"]-2.5, e["z"]-1.5], [e["x"]+2.5, e["z"]-1.5], [e["x"]+2.5, e["z"]+1.5], [e["x"]-2.5, e["z"]+1.5]]
                 prism(hi, box, y0+0.4, y0+2.9, [0.85, 0.60, 0.15])
-            for lm in c["landmarks"]:
-                y0 = ground(lm["x"], lm["z"])
-                box = [[lm["x"]-4, lm["z"]-4], [lm["x"]+4, lm["z"]-4], [lm["x"]+4, lm["z"]+4], [lm["x"]-4, lm["z"]+4]]
-                prism(hi, box, y0, y0+14, [0.85, 0.75, 0.45])
+            # 2026-11-27 D3：地标 8x8x14m 标记方块已删。B 路报的星光里 198m 塔、星河 41.2m 楼
+            # 经 GLB 三角形核实都在（塔顶 196.2m、楼顶 46.4m，顶面面积与足迹分毫不差）；
+            # B 的“缺失”是顶点口径问题（strict contains 漏掉了落在足迹边界上的棱柱角点）。
+            # 25 处地标都有真实体（楼/园区/水面/路桥），标记方块是诊断占位物，留着会歪曲白模，故删；
+            # 地标点仍在 c["landmarks"] 与 chunks/index.json 里计数，app 侧运行时标记不受影响。
             for (x, z, h) in c["lamps"]:
                 _y0 = ground(x, z)
                 hl.seg([x, _y0+0.3, z], [x, _y0+h+0.3, z], C_LAMP)
@@ -2102,6 +2876,97 @@ def main():
             for (x, z, yb) in c["lamps_tunnel"]:
                 # v3.2 第 18 项：隧道顶灯（地下，地面上不可见；1m 短竖线标记进 GLB 备以后用）
                 hl.seg([x, yb, z], [x, yb + 1.0, z], C_LAMP)
+            # ---- 2026-11-27 D3：高架护栏 / BRT 站台 / 园路 / 公园小品 / 亭子 / 天桥楼梯 ----
+            for ((x1, z1, h1), (x2, z2, h2)) in c["guardrails"]:
+                # 护栏：桥面两侧 3D 线，y = 地面 + deck_h + 1.1m；匝道口已在数据里断开
+                hl.seg([x1, gy(x1, z1)+h1+1.1, z1], [x2, gy(x2, z2)+h2+1.1, z2], C_RAIL)
+            for (x, z, dh, hd) in c["brt_platforms"]:
+                # BRT 站台：24x3m 板（0.3m 厚）+ 4 柱雨棚（+3.0m）+ 两侧栏杆线（示意尺寸）
+                _y0 = ground(x, z) + dh
+                _ux, _uz = math.cos(math.radians(hd)), math.sin(math.radians(hd))
+                _vx, _vz = -_uz, _ux
+                _corn = [[x+_ux*12*_a+_vx*1.5*_b, z+_uz*12*_a+_vz*1.5*_b]
+                         for _a, _b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                prism(hi, _corn, _y0, _y0+0.3, [0.70, 0.70, 0.72])
+                prism(hi, _corn, _y0+3.0, _y0+3.2, [0.60, 0.60, 0.65])
+                for _s in (-1, 1):
+                    for _t in (-1, 1):
+                        _px = x+_ux*11*_t+_vx*1.2*_s; _pz = z+_uz*11*_t+_vz*1.2*_s
+                        prism(hi, [[_px-0.15, _pz-0.15], [_px+0.15, _pz-0.15],
+                                  [_px+0.15, _pz+0.15], [_px-0.15, _pz+0.15]],
+                              _y0+0.3, _y0+3.0, [0.55, 0.55, 0.60])
+                for _s in (-1, 1):
+                    _ax, _az = x-_ux*12+_vx*1.5*_s, z-_uz*12+_vz*1.5*_s
+                    _bx, _bz = x+_ux*12+_vx*1.5*_s, z+_uz*12+_vz*1.5*_s
+                    hl.seg([_ax, _y0+1.2, _az], [_bx, _y0+1.2, _bz], C_RAIL)
+            for (a, b, hw2, rgb) in c["park_paths"]:
+                # 园路：1.5m 半宽窄带（地面+0.05m，与 road_ribbons 同画法）
+                _dx, _dz = b[0]-a[0], b[1]-a[1]
+                _ln = math.hypot(_dx, _dz) or 1.0
+                _px, _pz = -_dz/_ln*hw2, _dx/_ln*hw2
+                _ya, _yb = gy(a[0], a[1])+0.05, gy(b[0], b[1])+0.05
+                hi.quad([a[0]+_px, _ya, a[1]+_pz], [b[0]+_px, _yb, b[1]+_pz],
+                        [b[0]-_px, _yb, b[1]-_pz], [a[0]-_px, _ya, a[1]-_pz], [0, 1, 0], rgb)
+            for (x, z, kind) in c["park_amenities"]:
+                # 公园小品（示意尺寸）：厕所 3x2x2.5m，kiosk 2.5x2x2.5m
+                _y0 = ground(x, z)
+                if kind == "toilet":
+                    _box = [[x-1.5, z-1], [x+1.5, z-1], [x+1.5, z+1], [x-1.5, z+1]]
+                    prism(hi, _box, _y0+0.05, _y0+2.55, [0.65, 0.68, 0.72])
+                else:
+                    _box = [[x-1.25, z-1], [x+1.25, z-1], [x+1.25, z+1], [x-1.25, z+1]]
+                    prism(hi, _box, _y0+0.05, _y0+2.55, [0.75, 0.70, 0.60])
+            for (ring, kind) in c["park_pavilions"]:
+                # 亭子（示意）：环顶板（2.4–2.7m）+ 沿环每 ~5m 一根 0.3m 柱；无环的节点亭已按 4x4m 默认环入块
+                _ring = clean_ring(ring)
+                if len(_ring) < 3:
+                    continue
+                _cx = sum(p[0] for p in _ring)/len(_ring); _cz = sum(p[1] for p in _ring)/len(_ring)
+                _y0 = ground(_cx, _cz)
+                prism(hi, _ring, _y0+2.4, _y0+2.7, [0.72, 0.68, 0.60])
+                _acc = 0.0
+                for i in range(len(_ring)):
+                    _a, _b = _ring[i], _ring[(i+1) % len(_ring)]
+                    _acc += math.hypot(_b[0]-_a[0], _b[1]-_a[1])
+                    if _acc >= 5.0 or i == 0:
+                        _acc = 0.0
+                        _px, _pz = _a
+                        prism(hi, [[_px-0.15, _pz-0.15], [_px+0.15, _pz-0.15],
+                                  [_px+0.15, _pz+0.15], [_px-0.15, _pz+0.15]],
+                              _y0, _y0+2.4, [0.60, 0.58, 0.52])
+            for (x, z, kind, src) in c["park_leisure"]:
+                # 健身/游乐（示意尺寸）：fitness 一组 2.5x1.5x1.2m 器材簇；playground 4x3m 垫 + 两根 2.2m 高小架柱
+                _y0 = ground(x, z)
+                if kind == "fitness_station":
+                    _box = [[x-1.25, z-0.75], [x+1.25, z-0.75], [x+1.25, z+0.75], [x-1.25, z+0.75]]
+                    prism(hi, _box, _y0+0.05, _y0+1.25, [0.55, 0.62, 0.70])
+                else:
+                    _box = [[x-2, z-1.5], [x+2, z-1.5], [x+2, z+1.5], [x-2, z+1.5]]
+                    prism(hi, _box, _y0+0.05, _y0+0.35, [0.80, 0.70, 0.55])
+                    for _px in (x-1.5, x+1.5):
+                        prism(hi, [[_px-0.15, z-1.5], [_px+0.15, z-1.5],
+                                  [_px+0.15, z-1.2], [_px-0.15, z-1.2]],
+                              _y0+0.35, _y0+2.2, [0.60, 0.58, 0.52])
+            for _it in c["plaza_circles"]:
+                # 星泽广场三圆（hi+mid 两档都进；三角/线段按重心已分桶）
+                if _it[0] == "tri":
+                    _, _a, _b, _cc, _n, _rgb = _it
+                    hi.tri(_a, _b, _cc, _n, _rgb)
+                    mid.tri(_a, _b, _cc, _n, _rgb)
+                else:
+                    _, _a, _b, _rgb = _it
+                    hl.seg(_a, _b, _rgb)
+                    ml.seg(_a, _b, _rgb)
+            for (x, z, dh, hd, run, w) in c["foot_stairs"]:
+                # 天桥楼梯/坡道（示意尺寸：run = deck×1.8，台阶高 0.17m）：自桥端向外下坡的斜面
+                _y0 = ground(x, z)
+                _ux, _uz = math.cos(math.radians(hd)), math.sin(math.radians(hd))
+                _vx, _vz = -_uz, _ux
+                _tx, _tz = x+_ux*run, z+_uz*run
+                _hw2 = w/2.0
+                hi.quad([x+_vx*_hw2, _y0+dh, z+_vz*_hw2], [_tx+_vx*_hw2, _y0, _tz+_vz*_hw2],
+                        [_tx-_vx*_hw2, _y0, _tz-_vz*_hw2], [x-_vx*_hw2, _y0+dh, z-_vz*_hw2],
+                        [0, 1, 0], C_FOOTBRIDGE)
             for (x, z, h, w, rgb) in c["trees"]:
                 _y0 = ground(x, z)
                 hi.quad([x-w/2, _y0+0.3, z], [x+w/2, _y0+0.3, z], [x+w/2, _y0+h, z], [x-w/2, _y0+h, z], [0, 0, 1], rgb)
@@ -2161,6 +3026,14 @@ def main():
                    "trees": len(c["trees"]),
                    "greenway_segs": len(c["greenway"]),
                    "road_ribbons": len(c["road_ribbons"]),
+                   "guardrails": len(c["guardrails"]),
+                   "brt_platforms": len(c["brt_platforms"]),
+                   "park_paths": len(c["park_paths"]),
+                   "park_amenities": len(c["park_amenities"]),
+                   "park_pavilions": len(c["park_pavilions"]),
+                   "park_leisure": len(c["park_leisure"]),
+                   "plaza_circles": len(c["plaza_circles"]),
+                   "foot_stairs": len(c["foot_stairs"]),
                    "runway_segs": len(c["runway"]),
                    "aprons": len(c["aprons"]),
                    "special_lines": len(c["special_lines"]),
@@ -2200,6 +3073,12 @@ def main():
                 nx = int(T/90)+1
                 acc = Acc()
                 grid = [[ground(x0+i*90, z0+j*90) for i in range(nx)] for j in range(nx)]
+                # 2026-11-27 D3 广场圆环 ground_cut：站环碗（中心 -114.9,-565.3，R27.3）内地形采样点压到碗底以下（-8.5；碗底 ground-6.0 ≈ -8.04，2026-11-27 加深 4.0->6.0m）
+                if (tx, tz) == (-1, -1):
+                    for _jj in range(nx):
+                        for _ii in range(nx):
+                            if (x0+_ii*90+114.9)**2 + (z0+_jj*90+565.3)**2 < 27.3**2:
+                                grid[_jj][_ii] = -8.5
                 rgb = [0.85, 0.85, 0.85]
                 for j in range(nx-1):
                     for i in range(nx-1):
@@ -2251,16 +3130,16 @@ def main():
         for _chunk in iter(lambda: _f.read(1 << 20), b""):
             _hh.update(_chunk)
     heights_md5 = _hh.hexdigest()
-    json.dump({"chunks": merged, "format_version": FORMAT_VERSION, "generated": "2026-11-25",
+    json.dump({"chunks": merged, "format_version": FORMAT_VERSION, "generated": "2026-11-27",
                "heights": args.heights, "heights_md5": heights_md5,
-               "source": f"{args.heights} (md5 {heights_md5}) + city-wide.json + roads-all-levels-v1.json + bridges-v1.json + metro.json + compound-names.json + railway-v1.json (PBF实抽) + toll-booths-v1.json (PBF实抽) + chengdu-dem-90m-full-latlon.npy 6-tile Copernicus (read-only; 兴隆湖湖面压到 464m) + water-v1.json + lakes-assembled-v1.json + landuse-v1.json + road-widths-v1.json + national-rail-v1.json + lamps-city + worldcover-bone-bbox-10m.npz + street-trees-v1.json + aeroway-v1.json + mountain-pois-v1.json + bridge-shapes.json + lake-islands-v1.json (v3.2 岛塞) + metro-stations-geometry-v1.json (v3.2 站厅/站台) + bridge-tunnel-lamps tiles (v3.2 桥隧灯) + flowers-geometry-v1.json (v3.2 花坛，PBF实抽) + tunnels-v1.json (2026-11-26: tunnel=yes 排除地面画法；主干车行隧道洞口为示意尺寸洞门框） + river_rails (2026-11-26: water=river 边界 + 湖外环，示意 1.1m 高/10m 间距） + building-corrections-v1.json (2026-11-26: 建筑足迹修正层 134 条 clip/delete/add，见 virtual-city/data/building-corrections-v1.json)",
+               "source": f"{args.heights} (md5 {heights_md5}) + city-wide.json + roads-all-levels-v1.json + bridges-v1.json + metro.json (369 stations / 820 entrances, 2026-11-27 D3 补升仙湖站 + D口） + compound-names.json + railway-v1.json (PBF实抽) + toll-booths-v1.json (PBF实抽) + chengdu-dem-90m-full-latlon.npy 6-tile Copernicus (read-only; 兴隆湖湖面压到 464m) + water-v1.json (2026-11-27 河/水更新：+8 water=river 多边形，md5 a54fc4b3…) + lakes-assembled-v1.json (2026-11-27：青龙湖 1 外环+2 岛洞，md5 9dd3ffd8…) + landuse-v1.json + road-widths-v1.json + national-rail-v1.json + lamps-city + worldcover-bone-bbox-10m.npz + street-trees-v1.json + aeroway-v1.json + mountain-pois-v1.json + bridge-shapes.json + lake-islands-v1.json (2026-11-27：139 岛，+4 锦江河岛塞，md5 6c06457d…) + metro-stations-geometry-v1.json (v3.2 站厅/站台) + bridge-tunnel-lamps tiles (v3.2 桥隧灯) + flowers-geometry-v1.json (v3.2 花坛，PBF实抽) + tunnels-v1.json (2026-11-26: tunnel=yes 排除地面画法；主干车行隧道洞口为示意尺寸洞门框） + river_rails (2026-11-26: water=river 边界 + 湖外环，示意 1.1m 高/10m 间距；2026-11-27 D3：桥处抠洞） + building-corrections-v1.json (2026-11-26: 建筑足迹修正层 134 条 clip/delete/add，见 virtual-city/data/building-corrections-v1.json) + bridge-elev-overrides-v1.json + bridge-fb-decks-v1.json + bridge-piers-v1.json + bridge-guardrails-v1.json + bridge-footbridge-stairs-v1.json + tunnel-portals-nonvehicle-v1.json (2026-11-27 桥路 7 文件） + brt-stations-v1.json + six-parks-v1.json + park-amenities-v1.json + six-park-leisure.json (2026-11-27 公园 Parks2 收尾：厕所 119 独立/kiosk 9/亭子代用 40 含真 gazebo 3 座全在北湖/园路 3,310/园内水 134/健身游乐 48=OSM 31+种子 17，G04 2 项无面跳过；桂溪 100.7ha） + water-crossing-verdicts-2026-11-27.json (2026-11-27 河/水：B=23 真缺桥补建） + plaza-circles-v2.json (2026-11-27 广场三圆：圆盘 R75 + 太阳神鸟/花盘/站环剧场；landuse 减 R75 圆盘；地形 t_-1_-1 碗内压到 -8.5；烘焙排除 3 栋冲突楼；2026-11-27 加深 v2.1-deep：圆盘竖沿 +0.30、花瓣 0.6m、剧场 8x0.75m 深 6.0m）",
                "elevated_note": "metro elevated deck 9.0m pending-verification",
-               "interchange_note": "elevated ways (§7.14): own_deck>0 roads drawn at interpolated deck heights (standard stacking rule L*6.9m: clearance 5.0m CJJ37-2012 + structure 1.9m, inferred; measured overrides: chengwen top 32m, fuqing crest 15m, second-ring range midpoint 12.0m; zero-flat 2026-11-25: all 9,399 bridges have numeric deck heights (river base 3.0m, rail viaduct base 7.5m, metro viaduct base 9.0m, footbridge river base 2.0m; methods+errors in bridges-v1.json); solid decks since 2026-11-25 (deck slabs: top+bottom+sides, 1.9m thick vehicle / 0.8m footbridge, width from road-widths-v1 or grade-tier median fallback, top face shaded by OSM layer L1 dark to L5 light, top face also in mid LOD; piers as solid 1.6m square columns every ~30m where deck>2m, ground to deck underside, pier positions schematic not surveyed; V-piers of curved special bridges stay as paired lines; 66.16m pier gap kept at Hongpailou paifang); toll booths as 3x4m marker boxes, plaza outlines as ground rings",
-               "bridge_note": "non-elevated bridges (rail viaducts not in roads file) follow road level (flat lines); all deck_height_m numeric since 2026-11-25 zero-flat, estimates labelled with method+error in bridges-v1.json",
+               "interchange_note": "elevated ways (§7.14): own_deck>0 roads drawn at interpolated deck heights (standard stacking rule L*6.9m: clearance 5.0m CJJ37-2012 + structure 1.9m, inferred; measured overrides: chengwen top 32m, fuqing crest 15m, second-ring range midpoint 12.0m ESTIMATE not measured; zero-flat 2026-11-25: all 9,399 bridges have numeric deck heights (river base 3.0m, rail viaduct base 7.5m, metro viaduct base 9.0m, footbridge river base 2.0m; methods+errors in bridges-v1.json); solid decks since 2026-11-25 (deck slabs: top+bottom+sides, 1.9m thick vehicle / 0.8m footbridge, width from road-widths-v1 or grade-tier median fallback, top face shaded by OSM layer L1 dark to L5 light, top face also in mid LOD; piers as solid 1.6m square columns every ~30m where deck>2m, ground to deck underside, pier positions schematic not surveyed; V-piers of curved special bridges stay as paired lines; 66.16m pier gap kept at Hongpailou paifang); toll booths as 3x4m marker boxes, plaza outlines as ground rings; 2026-11-27 D3: elev heights single source of truth = bridge-elev-overrides-v1.json (restores 1,486 + pins 3 + cascade 57, vertex heights baked incl approach ramps); piers from bridge-piers-v1.json (27,500, classified beside-road/open/water/median/sidewalk-shifted/span-dropped); guardrails from bridge-guardrails-v1.json (>2m only, broken at ramp mouths); BRT platforms follow segment deck height",
+               "bridge_note": "non-elevated bridges (rail viaducts not in roads file) follow road level (flat lines); all deck_height_m numeric since 2026-11-25 zero-flat, estimates labelled with method+error in bridges-v1.json; 2026-11-27 D3: FB flat bridges now solid decks (bridge-fb-decks-v1.json, 377 ways / 2,508 segs in six districts, 1.9m veh / 0.8m foot), only 8 layer=0 at-grade ways stay flat lines; 23 true-missing water-crossing bridges built (water-crossing-verdicts B=23: veh deck 3.0m / foot 2.0m, one end segment as approach ramp); 4 suspension ramps on hold (no towers/cables, tags suspect, await street view)",
                "width_note": "carriageways drawn as ribbons from road-widths-v1.json (real-osm 150 + lanes-calc 6205 + grade-tier 52108 推算；footways stay lines); runway widths from OSM tags (45/60m), taxiway default 15m 推算",
                "dem_note": "DEM = 6-tile Copernicus GLO-30 (lon 102.8-105.0, lat 30.0-31.6), datum 506; old 4-tile chengdu-dem-90m.npy verified wrong and retired; core plain 478-568m mean 507.6 (flat, NOT a basin); Xinglong Lake cells flattened to 464m",
                "vegetation_note": "trees: WorldCover 10m tree mask sampled at 60m stride, hash-capped 200k, height 4-8m by hash (sampled/估算); OSM natural=tree 1207 at real positions (height by hash, 估算); flowerbeds v3.2: 26 OSM flowerbeds in bbox (25 ways + 1 node, PBF实抽几何；9 in 14km circle) drawn pink as flowers; gardens: 291 leisure=garden faces already in landuse as park (v3.1), not double-drawn",
-               "lakes_note": "11 lake entries (9 distinct names) assembled from OSM multipolygon relations by osmium export (real geometry); 5 entries inside six districts (北湖/锦城湖/白鹭湾x2/升仙湖), 6 outside by crop (龙泉湖/兴隆湖/麓湖/东安湖/青龙湖x2); 青龙湖 rel 10660802 geometry at lon 105.56 is corrupt in source, builds nothing; inner rings are island holes, skipped when matching lake-islands-v1.json (97 of 98 matched); lake islands since v3.2: 135 islands listed, 134 drawn as land plugs on the water surface (island-plug method; 1 degenerate 6m2 hole skipped, not silently dropped; 2 small plugs err -9.5%/-6.1%; without scipy 38 plugs err >6%)",
+               "lakes_note": "11 lake entries (9 distinct names) assembled from OSM multipolygon relations by osmium export (real geometry); 5 entries inside six districts (北湖/锦城湖/白鹭湾x2/升仙湖), 6 outside by crop (龙泉湖/兴隆湖/麓湖/东安湖/青龙湖x2); 青龙湖 rel 10660802 is a reservoir 128.6km east of six districts, NOT the real 成华青龙湖 (rel 12264762, never broken); inner rings are island holes, skipped when matching lake-islands-v1.json (97 of 98 matched); lake islands since v3.2: 139 islands listed (2026-11-27 river update: +4 锦江河 plugs; drawn count in generation log; 1 degenerate 6m2 hole skipped, not silently dropped; 2 small plugs err -9.5%/-6.1%; without scipy 38 plugs err >6%)",
                "greenway_note": "greenways = roads whose name contains 绿道 (155 ways: 绕城绿道 84, 龙泉山森林绿道 33, 锦江绿道 16, 毗河绿道 11, others 11), drawn as 4m green ribbons"},
               open(idx_path, "w"))
     print(f"DONE chunks built this run: {done_n}/{len(keys)}")

@@ -224,8 +224,6 @@ function buildPlayerCar(THREE) {
   body.box(0, 0.42, L / 2 + 0.02, W, 0.22, 0.2, 0, trimC); // 前包围
   body.box(0, 0.42, -L / 2 - 0.02, W, 0.22, 0.2, 0, trimC); // 后包围
   body.box(0, 0.72, L / 2 + 0.03, 1.1, 0.16, 0.06, 0, darkC); // 格栅（无标，空白）
-  body.box(0, 0.52, L / 2 + 0.06, 0.52, 0.12, 0.03, 0, darkC); // 前牌照位（空的，不装牌）
-  body.box(0, 0.52, -L / 2 - 0.06, 0.52, 0.12, 0.03, 0, darkC); // 后牌照位（空的，不装牌）
   body.box(0, 0.36, 0, W + 0.02, 0.1, L - 0.6, 0, trimC); // 侧裙
   for (const sx of [-1, 1]) {
     body.box(sx * (W / 2 + 0.06), 1.08, 0.75, 0.08, 0.14, 0.22, 0, bodyC); // 后视镜
@@ -552,8 +550,10 @@ function updateDials() {
 const _CLAY = 0xf2f0ea;
 export function setDisplay(mode) {
   _mode = mode || 'normal';
-  // 玩家车是座驾不是布景：白膜/热力模式下也保持可见（与 roads.js 的隐藏规则不同）。
-  if (_group) _group.visible = true;
+  // 玩家车是座驾不是布景：白膜/热力模式下也不藏（与 roads.js 的隐藏规则不同），
+  // 但可见性仍归 app.js 的 setMode 管（只在开车模式显示）：这里只按模式决定，不许无条件置 true
+  // （旧代码 _group.visible = true 会把车顶回走路/飞行画面里）。
+  if (_group) _group.visible = !_ctx || !_ctx.state || _ctx.state.mode === 'drive';
   // 白膜下整车漂白成陶土色（17:06 令：颜色全撤）：车身/内饰/仪表贴图全去色，切回恢复原值。
   if (_group) _group.traverse((o) => {
     if (!o.isMesh) return;

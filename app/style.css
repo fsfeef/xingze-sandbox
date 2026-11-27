@@ -89,12 +89,6 @@ h1 { font-size: 19px; letter-spacing: 3px; }
   background: rgba(255,255,255,.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
 #drive-bar button.active { background: linear-gradient(180deg, #2f6fed, #1d4fb8); }
 
-/* 统计 */
-#stats { position: fixed; left: calc(12px + env(safe-area-inset-left, 0px)); bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-  z-index: 10; padding: 8px 12px; font-size: 12px; line-height: 1.7; color: rgba(255,255,255,.85); display: none; }
-#stats.show { display: block; }
-#stats b { color: #7cf2a8; font-size: 14px; }
-
 #toast { position: fixed; bottom: 150px; left: 50%; transform: translateX(-50%); z-index: 30; padding: 11px 20px;
   font-size: 14px; border-radius: 999px; background: rgba(13,20,36,.9); color: #fff; border: 1px solid rgba(255,255,255,.16);
   opacity: 0; transition: opacity .3s; pointer-events: none; white-space: nowrap; max-width: 92vw; overflow: hidden; text-overflow: ellipsis; }
@@ -118,6 +112,51 @@ h1 { font-size: 19px; letter-spacing: 3px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #error-overlay { display: none; }
 #error-text { font-size: 14px; line-height: 1.8; color: #ffb3a7; margin-bottom: 18px; }
+
+/* ---- 横屏矮屏（手机横屏约 844×390）：布局修正（P 路重做第一步，2026-11-27） ----
+   实测三处问题（tests/page-step1-land.json + 横屏截图）：
+   ① 小地图顶到右上开关组下面，画布顶 6px 被白膜/泛光/设置/? 盖住；
+   ② 开始页卡片高 435px，390 高下上下都被裁（y -22~413）；
+   ③ 设置面板高 460px，390 高下底部 134px 被裁，还盖住小地图和时间轴右端；
+       720 高下也盖住小地图（168×149）。 */
+
+/* 小地图：矮屏缩小，顶部让出开关组 */
+@media (max-height: 500px) {
+  #minimap { width: 120px !important; height: 120px !important; }
+
+  /* 横屏矮屏顶栏帮助条会压在顶栏模式段上（help x 136~708 与 topbar x 12~362、y 12~45 重叠，
+     左半截字被顶栏盖住）：矮屏直接藏掉，操作说明在开场卡片里已有，点“?”可再开 */
+  #help { display: none !important; }
+
+  /* 开始页 / 加载 / 错误卡片：矮屏收紧，可滚到底，不裁 */
+  .overlay .card { width: min(460px, 92vw); padding: 18px 22px;
+    max-height: calc(100vh - 20px); overflow-y: auto; }
+  .overlay .card h1 { font-size: 26px; }
+  .overlay .card .sub { font-size: 12px; margin: 6px 0 12px; }
+  .overlay .card p { font-size: 12px; line-height: 1.8; }
+  #enter-btn { padding: 12px; margin-top: 14px; font-size: 16px; }
+  .spinner { width: 32px; height: 32px; margin-bottom: 12px; }
+}
+
+/* 设置面板：矮屏（≤880px 高）改居中，不再贴右侧盖小地图；
+   右侧贴边时面板底（64+460）一定撞上小地图顶（vh-354），vh<878 即撞。 */
+@media (max-height: 880px) {
+  #d-settings { left: 50% !important; right: auto !important; transform: translateX(-50%) !important;
+    top: 64px !important; max-height: calc(100vh - 200px) !important; overflow-y: auto !important; }
+}
+
+/* 设置面板：手机横屏（≤500px 高）再收紧——放得下 5 个开关，不碰时间轴（顶 316） */
+@media (max-height: 500px) {
+  #d-settings { top: 84px !important; width: min(300px, 92vw) !important;
+    max-height: calc(100vh - 110px) !important; }
+  #d-settings .sub { display: none !important; } /* 副标题 + 底部互斥说明（两者都是 .sub），矮屏隐藏 */
+  #d-settings .d-sw-row { padding: 3px 0 !important; }
+  #d-settings .d-sw-row .d-sw { width: 44px !important; height: 26px !important; }
+  #d-settings .d-sw-row .d-sw::after { width: 20px !important; height: 20px !important; }
+  #d-settings .d-sw-row.on .d-sw::after { transform: translateX(18px) !important; }
+  #d-settings .d-sw-row.is-press .d-sw::after { width: 26px !important; }
+  #d-settings .d-sw-row.is-press.on .d-sw::after { transform: translateX(12px) !important; }
+}
 
 @media (max-width: 760px) {
   #panel { width: 208px; top: 150px; }

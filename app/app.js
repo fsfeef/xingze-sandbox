@@ -1,4 +1,4 @@
-// 星泽市 · 虚拟城市沙盘 — app.js
+// 星泽市 · 游戏 — app.js
 // Three.js r170 · 性能优先：合并几何 + InstancedMesh，draw call 预算 < 60
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -79,6 +79,11 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
+// D18 阴影（2026-11-27）：此前 shadowMap 全程关闭（renderer.shadowMap.enabled 未设、
+// 744 个 mesh 里 0 个 castShadow/receiveShadow），白膜下只有面着色和烘焙顶点色的柔和短影，
+// 广场上不可能出现参考站 16:36 那种斜穿的大面积建筑阴影。开 PCFSoft 阴影，太阳光投射。
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87b5e0);
@@ -90,6 +95,16 @@ scene.add(hemi);
 const sunLight = new THREE.DirectionalLight(0xffffff, 2.2);
 sunLight.position.set(600, 900, 300);
 scene.add(sunLight);
+scene.add(sunLight.target); // D18：阴影方向要指着视点，target 必须进场景否则 matrixWorld 不更新
+sunLight.castShadow = true; // D18：太阳光投射阴影
+sunLight.shadow.mapSize.set(2048, 2048); // D18：2048 图 / ±800m 包围盒 ≈ 0.78m 每像素，白膜航拍够用
+sunLight.shadow.camera.left = -800; sunLight.shadow.camera.right = 800;
+sunLight.shadow.camera.top = 800; sunLight.shadow.camera.bottom = -800;
+sunLight.shadow.camera.near = 100; sunLight.shadow.camera.far = 4000;
+sunLight.shadow.camera.updateProjectionMatrix(); // 改了包围盒必须重算投影，否则还是默认 ±5m 的投影
+sunLight.shadow.bias = -0.0002; sunLight.shadow.normalBias = 1.5; // D18：平顶 acne 用 normalBias 顶，不动 bias 大头
+const _sunDir = new THREE.Vector3(), _shadowFocus = new THREE.Vector3(); // D18：每帧阴影跟随视点用
+let _shadowSweepAt = 0; // D18：阴影旗挂接节流（分块流式加载，一次性遍历挂不全）
 const moonLight = new THREE.DirectionalLight(0x8fa8ff, 0.0);
 moonLight.position.set(-500, 700, -300);
 scene.add(moonLight);
@@ -102,7 +117,7 @@ const state = {
   pos: new THREE.Vector3(0, 1.7, 420),   // 走路/飞行相机位置
   lookYaw: Math.PI, lookPitch: -0.04,    // 走路/飞行朝向
   fov: 55,
-  hour: 10, playing: false,
+  hour: 16.6, playing: false, // D18：默认 16:36（冬至，影长 3.6×楼高；此前默认 10:00 春分，影长 1.45×，改时间不改季节等于没改）
   night: 0,                              // 0 白天 … 1 深夜
   display: 'white',                     // normal | heat | white（默认白膜：白天航拍干净浅灰白块）
   bloom: false,
@@ -598,8 +613,10 @@ function applyTime(hour) {
   moonLight.intensity = state.night * 0.35;
   // 夜色传播给接线模块（roads 灯光池/路面微光、sun 亮窗 shader；各自幂等）
   if (window.__roads && window.__roads.setNight) { try { window.__roads.setNight(state.night); } catch (e) { /* 夜色传播失败不阻断时间轴 */ } }
+  if (window.__sidewalks && window.__sidewalks.setNight) { try { window.__sidewalks.setNight(state.night); } catch (e) {} }
   if (window.__dSunNight && window.__dSunNight.setNight) { try { window.__dSunNight.setNight(state.night); } catch (e) { /* 同上 */ } }
   if (window.__roofsApi && window.__roofsApi.setNight) { try { window.__roofsApi.setNight(state.night); } catch (e) { /* 同上 */ } }
+  if (window.__traffic && window.__traffic.setNight) { try { window.__traffic.setNight(state.night); } catch (e) {} }
   // 白模阶段锁死白膜：夜里也不切回正常（2026-11-26 17:06 令：游戏里颜色全撤）
   // 只在昼夜边界切换时动一次；手动白膜按钮在其间不受顶（applyTime 只在时间变化时跑）
   const _isNight = state.night >= 0.5;
@@ -733,9 +750,15 @@ function flyTo(x, z, opts = {}) {
     p1 = new THREE.Vector3(x, 110, z + 140);
     t1 = new THREE.Vector3(x, 10, z);
   } else if (state.mode === 'drive') {
-    const B = BOUNDS();
-    car.x = clamp(x, B.x[0] + 50, B.x[1] - 50); car.z = clamp(z, B.z[0] + 50, B.z[1] - 50); car.speed = 0;
-    toast('已把车开到目标附近');
+    const snap = snapCarToRoad(x, z);
+    if (snap) {
+      car.x = snap.x; car.z = snap.z; car.heading = snap.heading; car.speed = 0;
+      toast('已把车开到目标附近的右侧车道');
+    } else {
+      const B = BOUNDS();
+      car.x = clamp(x, B.x[0] + 50, B.x[1] - 50); car.z = clamp(z, B.z[0] + 50, B.z[1] - 50); car.speed = 0;
+      toast('已把车开到目标附近');
+    }
     return;
   } else {
     const dist = opts.dist || 420;
@@ -764,12 +787,86 @@ function finishFlyAnim() {
   flyAnim = null;
 }
 
+// ---------- 开车贴路 / 靠右（只读 window.__roads 的路网数据，不改 roads.js） ----------
+// 路网点是 [x, z, y]，行车方向沿 pts 顺序；右侧 = (-fz, fx)，右车道中心在中心线右侧 width/4 处
+// （与 roads.js 里 AI 车的算法一致：横向目标 width/4，右侧 (-fz, fx)）。
+let _roadSegs = null; // [{ax,az,bx,bz,dx,dz,len,w}] 懒加载，只建一次
+function roadSegments() {
+  if (_roadSegs) return _roadSegs;
+  const data = window.__roads && window.__roads.data;
+  const arts = data && data.arterials;
+  if (!arts || !arts.length) return null;
+  const segs = [];
+  for (const a of arts) {
+    const pts = a.pts; if (!pts || pts.length < 2) continue;
+    const w = a.width || 10.5;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const ax = pts[i][0], az = pts[i][1], bx = pts[i + 1][0], bz = pts[i + 1][1];
+      const dx = bx - ax, dz = bz - az, len = Math.hypot(dx, dz);
+      if (len < 0.5) continue;
+      segs.push({ ax, az, bx, bz, dx: dx / len, dz: dz / len, len, w });
+    }
+  }
+  _roadSegs = segs.length ? segs : null;
+  return _roadSegs;
+}
+function nearestRoad(x, z) {
+  const segs = roadSegments();
+  if (!segs) return null;
+  let best = null, bestD2 = Infinity;
+  for (const s of segs) {
+    const t = clamp(((x - s.ax) * s.dx + (z - s.az) * s.dz) / s.len, 0, 1);
+    const px = s.ax + s.dx * s.len * t, pz = s.az + s.dz * s.len * t;
+    const d2 = (x - px) * (x - px) + (z - pz) * (z - pz);
+    if (d2 < bestD2) { bestD2 = d2; best = { seg: s, px, pz, t, d: Math.sqrt(d2) }; }
+  }
+  return best;
+}
+// 把车放到最近一段路的右侧车道上，车头顺路向；找不到路网数据（或离路 >400m）返回 null，调用方用旧落点
+function snapCarToRoad(x, z) {
+  const n = nearestRoad(x, z);
+  if (!n || n.d > 400) return null;
+  const s = n.seg;
+  const rx = -s.dz, rz = s.dx; // 右侧
+  const lat = s.w / 4;
+  return { x: n.px + rx * lat, z: n.pz + rz * lat, heading: Math.atan2(s.dx, s.dz), roadD: n.d, roadW: s.w };
+}
+// 跟路辅助：不打方向、往前开时，车头慢慢贴向最近路段的右侧车道线（pure pursuit，
+// 跟随点在车道线上前方 15m）；一打方向就交回给玩家；和路向差 >0.6 rad（路口/逆向）时不跟，免得乱拐
+let _assistCache = { t: 0, x: 0, z: 0, n: null };
+function roadAssist(dt) {
+  const steerIn = (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0)
+    + (joy.active ? -joy.x : 0);
+  if (Math.abs(steerIn) > 0.05 || car.speed < 3) return;
+  const now = performance.now();
+  if (now - _assistCache.t > 250 || Math.hypot(car.x - _assistCache.x, car.z - _assistCache.z) > 25) {
+    _assistCache = { t: now, x: car.x, z: car.z, n: nearestRoad(car.x, car.z) };
+  }
+  const n = _assistCache.n;
+  if (!n || n.d > 20) return;
+  const s = n.seg;
+  const rx = -s.dz, rz = s.dx;
+  const lat = s.w / 4;
+  const tx = n.px + rx * lat + s.dx * 15, tz = n.pz + rz * lat + s.dz * 15;
+  const want = Math.atan2(tx - car.x, tz - car.z);
+  let dh = want - car.heading;
+  while (dh > Math.PI) dh -= Math.PI * 2;
+  while (dh < -Math.PI) dh += Math.PI * 2;
+  if (Math.abs(dh) > 0.6) return;
+  car.heading += clamp(dh, -0.5 * dt, 0.5 * dt);
+}
+// 车内近裁剪：仪表盘/方向盘在 1m 内，默认 near=1 会把它们裁掉；切回其他视角时恢复 1
+function setCamNear(v) {
+  if (camera.near !== v) { camera.near = v; camera.updateProjectionMatrix(); }
+}
+
 // ---------- 模式切换 ----------
 function setMode(mode) {
   if (state.mode === mode) return;
   stopTour();
   const prev = state.mode;
   state.mode = mode;
+  if (mode !== 'drive') setCamNear(1);
   document.querySelectorAll('#mode-seg button').forEach((b) => {
     const on = b.dataset.mode === mode;
     b.classList.toggle('active', on); b.setAttribute('aria-selected', String(on));
@@ -777,22 +874,30 @@ function setMode(mode) {
   $('#drive-bar').classList.toggle('show', mode === 'drive');
   carGroup.visible = mode === 'drive';
   if (mode === 'drive') {
-    // 车停在当前视点地面处
+    // 车停在当前视点附近的路右侧车道上，车头顺路向；没路网数据时落回旧做法（视点地面）
     const gp = prev === 'aerial' ? state.target : state.pos;
-    const B = BOUNDS();
-    car.x = clamp(gp.x, B.x[0] + 50, B.x[1] - 50); car.z = clamp(gp.z, B.z[0] + 50, B.z[1] - 50);
-    car.heading = prev === 'aerial' ? state.yaw + Math.PI : state.lookYaw;
+    const snap = snapCarToRoad(gp.x, gp.z);
+    if (snap) {
+      car.x = snap.x; car.z = snap.z; car.heading = snap.heading;
+      toast('开车：已停在右侧车道 · W 油门 S 刹车 A/D 转向');
+    } else {
+      const B = BOUNDS();
+      car.x = clamp(gp.x, B.x[0] + 50, B.x[1] - 50); car.z = clamp(gp.z, B.z[0] + 50, B.z[1] - 50);
+      car.heading = prev === 'aerial' ? state.yaw + Math.PI : state.lookYaw;
+      toast('开车：W 油门 · S 刹车 · A/D 转向');
+    }
     car.speed = 0;
-    toast('开车：W 油门 · S 刹车 · A/D 转向');
   } else if (mode === 'walk') {
     const gp = prev === 'aerial' ? state.target : state.pos;
     state.pos.set(gp.x, groundY(gp.x, gp.z + 24) + 1.7, gp.z + 24);
-    state.lookYaw = prev === 'aerial' ? state.yaw + Math.PI : state.lookYaw;
+    // 朝向跟进入前的视线一致：航拍视线方向是 (-sin yaw, -cos yaw)，走路前向是 (-sin lookYaw, -cos lookYaw)，
+    // 所以 lookYaw = yaw（旧代码 yaw+π 是反的，进走路会面朝身后）；从开车切来时朝向跟车头一致
+    state.lookYaw = prev === 'aerial' ? state.yaw : prev === 'drive' ? car.heading + Math.PI : state.lookYaw;
     state.lookPitch = -0.02; state.fov = 62;
   } else if (mode === 'fly') {
     const gp = prev === 'aerial' ? state.target : state.pos;
     state.pos.set(gp.x, 120, gp.z + 160);
-    state.lookYaw = prev === 'aerial' ? state.yaw + Math.PI : state.lookYaw;
+    state.lookYaw = prev === 'aerial' ? state.yaw : prev === 'drive' ? car.heading + Math.PI : state.lookYaw;
     state.lookPitch = -0.25; state.fov = 55;
   } else if (mode === 'aerial') {
     const gp = prev === 'drive' ? new THREE.Vector3(car.x, 0, car.z) : state.pos;
@@ -845,7 +950,7 @@ function setDisplay(mode) {
   }
   // 接线模块的显示切换（roofs 经 sixLoader 包装链式调用，不在这里重复调；
   // skin 停了（STOP 守卫），window.__skin 不存在，不传播）
-  for (const k of ['__roads', '__dSun', '__people', '__playercar', '__dWeather', '__dMaps', '__towerFix', '__street', '__perf']) {
+  for (const k of ['__roads', '__traffic', '__sidewalks', '__rail', '__dSun', '__people', '__playercar', '__dWeather', '__dMaps', '__towerFix', '__street', '__perf']) {
     const m = window[k];
     if (m && typeof m.setDisplay === 'function') { try { m.setDisplay(mode); } catch (e) { console.warn('[sandbox] setDisplay failed:', k, e); } }
   }
@@ -1139,28 +1244,35 @@ function animate(now) {
     const backIn = (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
     const steerIn = (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0)
       + (joy.active ? -joy.x : 0);
-    if (fwdIn > 0) car.speed += 14 * fwdIn * dt;
+    if (fwdIn > 0) car.speed += 20 * fwdIn * dt;
     if (backIn > 0) car.speed -= (car.speed > 0.5 ? 26 : 8) * dt;
-    car.speed -= car.speed * 0.55 * dt; // 阻力
+    car.speed -= car.speed * 0.35 * dt; // 阻力（旧 14 / 0.55 时油门顶满平衡在约 25.5 m/s ≈ 92 km/h，到不了 120；现 20 / 0.35 平衡 57 m/s，由 33.3 m/s = 120 km/h 上限截断）
     car.speed = clamp(car.speed, -6, sixMode ? 33 : 22); // 六区 120 km/h（他定的数）
     if (Math.abs(car.speed) > 0.05) car.heading += steerIn * 1.5 * dt * Math.sign(car.speed) * clamp(Math.abs(car.speed) / 8, 0.25, 1);
     car.x += Math.sin(car.heading) * car.speed * dt;
     car.z += Math.cos(car.heading) * car.speed * dt;
-    const B = BOUNDS();
+      const B = BOUNDS();
     if (car.x < B.x[0] || car.x > B.x[1] || car.z < B.z[0] || car.z > B.z[1]) { car.speed *= -0.2; car.x = clamp(car.x, B.x[0], B.x[1]); car.z = clamp(car.z, B.z[0], B.z[1]); }
     const gy = groundY(car.x, car.z);
     carGroup.position.set(car.x, gy, car.z);
     carGroup.rotation.y = car.heading;
+    roadAssist(dt); // 不打方向时顺路贴右车道走
     $('#drive-speed').textContent = `${Math.round(Math.abs(car.speed) * 3.6)} km/h`;
     if (state.carView === 'follow') {
       const bx = car.x - Math.sin(car.heading) * 15, bz = car.z - Math.cos(car.heading) * 15;
       camera.position.lerp(new THREE.Vector3(bx, gy + 6.5, bz), 1 - Math.pow(0.001, dt));
       camera.lookAt(car.x, gy + 1.6, car.z);
+      setCamNear(1);
     } else {
-      camera.position.set(car.x + Math.sin(car.heading) * 0.4, gy + 1.35, car.z + Math.cos(car.heading) * 0.4);
+      // 车内第一人称：驾驶座人眼（局部 x +0.38 即驾驶座，y 1.32，z 0.05），
+      // 正前方是方向盘（z 0.42）→ 仪表盘（z 0.70/0.98）→ 挡风玻璃外路面；near 0.05 否则近处全被裁
+      const fx = Math.sin(car.heading), fz = Math.cos(car.heading);
+      const rx = Math.cos(car.heading), rz = -Math.sin(car.heading);
+      camera.position.set(car.x + rx * 0.38 + fx * 0.05, gy + 1.32, car.z + rz * 0.38 + fz * 0.05);
       camera.rotation.set(0, 0, 0);
       camera.rotateY(car.heading + Math.PI);
-      camera.rotateX(-0.03);
+      camera.rotateX(-0.06);
+      setCamNear(0.05);
     }
     if (camera.fov !== 62) { camera.fov = 62; camera.updateProjectionMatrix(); }
   } else if (state.mode === 'walk' || state.mode === 'fly') {
@@ -1208,16 +1320,45 @@ function animate(now) {
     sixLoader.update(view);
   }
 
+  // D18 阴影跟随（2026-11-27）：sun.js 每帧按真太阳位置摆 sunLight.position（相对原点），
+  // 这里把它换算成以视点为中心的方向光（方向不变）：target 指着视点、光摆在视点沿太阳方向 1800m 外，
+  // 阴影相机 ±800m 紧包围盒只覆盖视点周围，白膜航拍的广场长影就落在这个盒里。夜里太阳强度≈0，不跟随。
+  if (state.night < 0.5) {
+    _sunDir.copy(sunLight.position).normalize();
+    if (state.mode === 'aerial') _shadowFocus.copy(state.target);
+    else if (state.mode === 'drive') _shadowFocus.set(car.x, 0, car.z);
+    else _shadowFocus.copy(state.pos);
+    sunLight.target.position.copy(_shadowFocus);
+    sunLight.target.updateMatrixWorld();
+    sunLight.position.copy(_shadowFocus).addScaledVector(_sunDir, 1800);
+  }
+  // D18 阴影旗挂接（每秒扫一次）：分块/地形/路面是流式加载的，一次性遍历挂不全，新流进来的 mesh 在这里补挂。
+  // 楼块投射+接收；地形/路面/街面只接收（它们是地面，投射会糊）；铁轨/雨雪/太阳盘/玩家车不碰。
+  if (now - _shadowSweepAt > 1000) {
+    _shadowSweepAt = now;
+    scene.traverse((o) => {
+      if (!o.isMesh || o.userData.__shadowFlagged) return;
+      o.userData.__shadowFlagged = true;
+      const pn = (o.parent && o.parent.name) || '';
+      const n = o.name || '';
+      if (pn === 'six-chunks' || pn === 'six-fabric' || pn === 'six-outer-ring' || pn === 'tower-339-fix'
+        || pn === 'surpass-roofs' || pn === 'surpass-landmarks'
+        || n.indexOf('chunk-merged') === 0 || n.indexOf('roof-merged') === 0) {
+        o.castShadow = true; o.receiveShadow = true;
+      } else if (pn === 'six-terrain' || pn === 'roads-surpass' || pn === 'sidewalks'
+        || n.indexOf('street-merged') === 0) {
+        o.receiveShadow = true;
+      }
+    });
+  }
+
   if (state.bloom && composer) composer.render();
   else renderer.render(scene, camera);
 
-  // 统计（每 0.5s）
+  // 统计（每 0.5s，只进 window.__sandboxStats 供模块读，页面上不显示调试数字）
   statTimer += dt;
   if (statTimer > 0.5) {
     statTimer = 0;
-    $('#stat-fps').textContent = `${fpsEMA.toFixed(0)} FPS`;
-    $('#stat-calls').textContent = renderer.info.render.calls;
-    $('#stat-tris').textContent = renderer.info.render.triangles.toLocaleString();
     window.__sandboxStats = { fps: Math.round(fpsEMA), calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, six: (sixMode && sixLoader) ? sixLoader.statsSnapshot() : null };
   }
   mapTimer += dt;
@@ -1236,13 +1377,17 @@ async function loadData() {
 }
 // ---------- 超过方案模块接线（总协调 2026-11-26 15:33 接线令） ----------
 // 每个模块单独 try/catch：一个模块坏了只记失败，不阻断启动和其他模块。
-// 顺序：塔 → 屋顶 → 路 → 街面/人 → 玩家车 → 太阳 → 天气 → 设置 → 地图。
+// 顺序：塔 → 屋顶 → 路 → 人行道 → 交通 → 铁路 → 街面/人 → 玩家车 → 太阳 → 天气 → 设置 → 地图。
 // settings 依赖 __dWeather/__dSun（懒取），须在 weather/sun 之后 init。
+// sidewalks / traffic 须在 roads 之后 init（等 __roads.data 路网，见 sidewalks.js:460 / traffic.js:551）。
 // 不碰 sixLoader.setDisplay 共享材质切换逻辑（roofs 经包装链式调用）。
 const WIRING = [
   ['tower-fix', './tower-fix.js'],
   ['roofs', './roofs.js'],
   ['roads', './roads.js'],
+  ['sidewalks', './sidewalks.js'],
+  ['traffic', './traffic.js'],
+  ['rail', './rail.js'],
   ['street', './street.js'],
   ['people', './people.js'],
   ['playercar', './playercar.js'],
@@ -1294,11 +1439,8 @@ async function init() {
       // 城市数据面板、地标/分区列表已拿掉（13:47 令），不再画图表、不再建列表。
       drawMinimap();
       await wireSurpassModules();
-      $('#stat-buildings').textContent = six.counts.buildings.toLocaleString();
-      $('#stat-trees').textContent = six.counts.trees.toLocaleString();
-      $('#mock-badge').style.display = 'none';
       $('#data-note').textContent = `六区白模 ${six.meta.version}：${six.counts.buildings.toLocaleString()} 栋楼 · ${six.counts.road_segs.toLocaleString()} 段路 · ${six.counts.stations} 个地铁站（572 实测口 + 446 推算口，未核对）· ${six.counts.landmarks} 个地标 · 桥 ${six.counts.bridge_segs} 段 · 路灯 ${six.counts.lamps.toLocaleString()} 盏 · 树 ${six.counts.trees.toLocaleString()} 棵`;
-      applyTime(10);
+      applyTime(16.6);
       setDisplay('white'); // 默认白膜：白天航拍干净浅灰白块（16:28 令）；白模阶段夜里也不切回正常（17:06 令）
       syncCamera();
       await renderer.compileAsync(scene, camera);
@@ -1312,15 +1454,12 @@ async function init() {
     DATA = normalizeData(await loadData());
     const counts = buildCity(DATA);
     drawMinimap();
-    $('#stat-buildings').textContent = DATA.buildings.length;
-    $('#stat-trees').textContent = counts.treeCount;
     // 数据说明：mock 还是真实数据，如实标
     const isMock = !!(DATA.meta && DATA.meta.mock);
-    $('#mock-badge').style.display = isMock ? '' : 'none';
     $('#data-note').textContent = isMock
       ? `当前为 mock 数据：${DATA.buildings.length} 栋楼，等生成工人的真实 city.json 后替换`
       : `真实数据 v${(DATA.meta && DATA.meta.version) || '1.0'}：${DATA.buildings.length} 栋楼 · ${DATA.roads.length} 条路 · ${DATA.landmarks.length} 个地标 · 最高 ${Math.max(...DATA.buildings.map((b) => b.height_m))} m`;
-    applyTime(10);
+    applyTime(16.6);
     syncCamera();
     await renderer.compileAsync(scene, camera);
     $('#loading-overlay').style.display = 'none';
@@ -1352,6 +1491,7 @@ init();
 // Modules receive this ctx and must NOT edit app.js / six-loader.js / index.html.
 window.__sandbox = {
   scene, camera, renderer, state, THREE,
+  get car() { return car; }, // 逻辑车态（开车贴路/跟路/探针读数用；渲染位置是 carGroup，随帧更新）
   get sixLoader() { return sixLoader; },
   get sixIndex() { return sixIndex; },
   get DATA() { return DATA; },

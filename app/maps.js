@@ -442,6 +442,10 @@ export function init(c) {
   if (wrap && !$('#d-minimap-badge')) {
     badge = document.createElement('div');
     badge.id = 'd-minimap-badge';
+    // 定宽：坐标文字每 500ms 变长会撑宽 #minimap-wrap（右锚定），导致
+    // #minimap 画布在屏上左右漂移，点按换算用的矩形与点击瞬间不一致
+    // （1px ≈ 285m，20px 漂移就是 5km 误差）。定宽后画布位置恒定。
+    badge.style.cssText = 'display:block;width:200px;margin:0 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     badge.textContent = '小地图 · 点按飞行';
     wrap.appendChild(badge);
   }

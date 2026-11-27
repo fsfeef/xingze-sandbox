@@ -1,0 +1,62 @@
+{
+ "version": "plaza-circles-v2.1-deep",
+ "disc_centre": {
+  "x": -161.5,
+  "z": -567.0
+ },
+ "structures": {
+  "left_sunbird": {
+   "center": {
+    "x": -204.0,
+    "z": -569.8,
+    "lon": 104.06287,
+    "lat": 30.659845
+   }
+  },
+  "mid_flower": {
+   "center": {
+    "x": -161.5,
+    "z": -567.1,
+    "lon": 104.063266,
+    "lat": 30.659823
+   }
+  },
+  "right_amphitheatre": {
+   "center": {
+    "x": -114.9,
+    "z": -565.3,
+    "lon": 104.064011,
+    "lat": 30.660052
+   }
+  }
+ },
+ "triangles": 6911,
+ "lines": 128,
+ "glb": "/home/hatch/workspace/virtual-city/white-model-six-districts/plaza-circles.glb",
+ "glb_bytes": 753904,
+ "sha256": "67e99b7e6f4d98115bfd31f3e17193c7ea3c59504534654ce1a26bc37e11da1c",
+ "bounds": {
+  "x": [
+   -236.5,
+   -86.5
+  ],
+  "z": [
+   -642.0,
+   -492.0
+  ],
+  "y": [
+   -8.04,
+   11.98
+  ]
+ },
+ "chunks_affected": [
+  [
+   119,
+   100
+  ],
+  [
+   119,
+   101
+  ]
+ ]
+}

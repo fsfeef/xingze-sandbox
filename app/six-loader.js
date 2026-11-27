@@ -124,10 +124,10 @@ export class SixLoader {
 
     // 全城共享材质（不随分块新建，避免 program/材质爆炸）
     this.matNormal = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 });
-    // 白膜下树按参考收深：分块里树是两片交叉绿面片，与楼同在一个合并网格里，只能按顶点色在片元里区分。
-    // 树绿（R 0.28–0.38, G 0.48–0.58）与绿化带同色，一并收深；楼全是纯灰（0.70–0.91），公园/绿地绿更亮（G≥0.65），不会误判。
+    // 白膜下树按参考站新标准（2026-11-27，旧“收深灰”作废）：分块里树是两片交叉绿面片，与楼同在一个合并网格里，只能按顶点色在片元里区分。
+    // 树绿（R 0.28–0.38, G 0.48–0.58）与绿化带同色，一并刷白/浅灰；楼全是纯灰（0.70–0.91），公园/绿地绿更亮（G≥0.65），不会误判。
     this.matClay = new THREE.MeshStandardMaterial({ color: 0xf2f0ea, roughness: 0.95, metalness: 0, vertexColors: true });
-    const _treeDark = new THREE.Color(0x3a3d40); // 深灰近黑（参考：树是深灰/近黑不规则团块）
+    const _treeLite = new THREE.Color(0xd9dbde); // 白/浅灰（参考：树是白/浅灰团块，比陶土底深一档，仍能认出是树）
     const _clayLite = new THREE.Color(0xf2f0ea);
     this.matClay.onBeforeCompile = (shader) => {
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -136,8 +136,15 @@ export class SixLoader {
     {
       vec3 vc = vColor;
       bool isTree = (vc.g > vc.r + 0.08) && (vc.g > vc.b + 0.08) && (vc.g < 0.62) && (vc.r < 0.42);
-      if (isTree) { diffuseColor.rgb = vec3(${_treeDark.r.toFixed(4)}, ${_treeDark.g.toFixed(4)}, ${_treeDark.b.toFixed(4)}); }
-      else { diffuseColor.rgb = vec3(${_clayLite.r.toFixed(4)}, ${_clayLite.g.toFixed(4)}, ${_clayLite.b.toFixed(4)}); }
+      if (isTree) { diffuseColor.rgb = vec3(${_treeLite.r.toFixed(4)}, ${_treeLite.g.toFixed(4)}, ${_treeLite.b.toFixed(4)}); }
+      else {
+        // D13（2026-11-27）：非树三角不写死平板色，按顶点色灰度做带下限的压缩映射，
+        // 保留相对明暗（广场三圆 0.84/0.72/0.88·0.78/0.80·0.88 在白膜下可读）。
+        // 不能线性乘 vc/0.84——深色沥青路会被拉成深灰，破坏白膜浅灰观感。
+        float g = (vc.r + vc.g + vc.b) / 3.0;
+        float k = clamp(0.80 + 0.20 * (g - 0.55) / 0.45, 0.80, 1.02);
+        diffuseColor.rgb = vec3(${_clayLite.r.toFixed(4)}, ${_clayLite.g.toFixed(4)}, ${_clayLite.b.toFixed(4)}) * k;
+      }
     }`
       );
     };
@@ -809,6 +816,22 @@ export class SixLoader {
     const tm = this._terrainMat();
     for (const m of this.terrain.values()) m.material = tm;
     for (const m of this.far.values()) m.material = tm;
+    // 白膜下楼边线换浅灰（B 路 2026-11-27）：分块 GLB 自带的 LINE 网格与
+    //   perf 合并出的 chunk-merged-line-global 共用 matLine 这一个实例，
+    //   原地改它的 vertexColors/color，不换实例——合并体不用重建就跟上。
+    //   只藏不换色不够：perf 每 1500ms tick 里签名一变就重建合并体，
+    //   新体 visible 默认 true，要等 roofs 每 900ms 的 tick 来藏，
+    //   飞过去/流式加载时每栋楼边缘黑线一直在闪；新块未合并、LOD 切换那
+    //   1.5s 里源线也是原样显示。换成浅灰后这些瞬态露出来的线也不再是黑框。
+    //   白膜出：vertexColors 改回 true、color 回白；vertexColors 切换要
+    //   needsUpdate 才会重编 shader，否则颜色不生效。
+    if (mode === 'white') {
+      if (this.matLine.vertexColors) { this.matLine.vertexColors = false; this.matLine.needsUpdate = true; }
+      this.matLine.color.set(0xdcdde0);
+    } else {
+      if (!this.matLine.vertexColors) { this.matLine.vertexColors = true; this.matLine.needsUpdate = true; }
+      this.matLine.color.set(0xffffff);
+    }
   }
 
   // ---------- 地面高度（走路/开车用，节流缓存） ----------

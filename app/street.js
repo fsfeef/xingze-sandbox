@@ -2514,12 +2514,26 @@ const scannedRoots = new Set();
 let shopSignMats = []; // 每块招牌的材质（昼夜亮度调节用）
 let neonMeshes = [];   // 霓虹件（白膜模式要收起来）
 let origInstanceColors = new Map(); // mesh.uuid -> Map(index -> hex)
+// D14：白膜下站厅/站牌金属度压暗（场景无环境贴图，金属度直接吃掉漫反射，
+// 背阴面白墙被压成深蓝灰；探针实测金属度置 0 后最暗处亮约 20%）。白膜置 0
+// （+粗糙度 0.95，同陶土），默认模式恢复原值。合并拷贝由 perf 按源材质参数
+// 重烘焙，跟着变，无需另处理。
+const _whiteMetalMats = []; // { mat, rough, metal }
+// D12（2026-11-27 老大定，选 b）：白膜下公交棚留一点深色差、看得见，不全刷白到隐形。
+// 棚白膜实例色：中灰 0x9AA0A6（仍是白膜浅灰体系，无彩色；航拍 90–130m 下 4m 顶与浅灰地面有色差）。
+// 默认模式仍是深蓝/深绿（origInstanceColors 里的原色，setDisplay 非白膜分支恢复）。
+const SHELTER_WHITE_GREY = 0x9AA0A6;
+let _shelterMesh = null; // 公交棚 InstancedMesh（900 座，loadBusStops 建）
 let rafId = 0;
 let lastT = 0;
 let displayMode = 'normal';
 // 灯杆实体（本轮新增）：杆/臂/头各一个 InstancedMesh，按分块 root 缓存后合并重建
 let lampPoles = null;  // { poles, arms, heads } 或 null（未建/0 根时）
 let lampPoleCount = 0;
+// 白膜下灯杆色：浅灰 0xD9DBDE（与树白膜 lite 同档，参考站沿路/广场细长浅色杆）。
+// 不用纯白：白杆贴白地面/白广场看不见；也不用原深色 0x2C3138/0x555555。
+// 白膜切换后才重建的杆必须也刷成这个色（见 rebuildLampPoles 末尾 + setDisplay 白膜分支）。
+const LAMP_WHITE_GREY = 0xD9DBDE;
 const poleByRoot = new Map(); // rootUuid -> Float32Array（每根杆 8 浮点：杆位x,底y,杆位z,头x,头y,头z,臂向x,臂向z）
 const ARM_LEN = 1.6;   // 挑臂长：杆顶向路中线伸 1.6m，灯头在臂端
 const MAIN_LAMP_DIST = 25; // 主干判定：灯离主干中心线 ≤25m 才立杆（主干先做）
@@ -2811,6 +2825,14 @@ function rebuildLampPoles() {
     group.add(mesh);
   }
   lampPoles = { poles, arms, heads };
+  // 白膜切换后才重建的杆：通用刷白（setDisplay 白膜分支）已经跑过，不会再跑一遍，
+  // 新 mesh 仍是建时的深色原色——这里按当前模式补刷，否则白膜下新进分块的灯杆全是深色。
+  if (displayMode === 'white') {
+    for (const m of [poles, arms, heads]) {
+      for (let i = 0; i < m.count; i++) m.setColorAt(i, c.setHex(LAMP_WHITE_GREY));
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    }
+  }
 }
 
 function buildLamps() {
@@ -3111,7 +3133,163 @@ function buildShops() {
 const TREE_SPECIES = ['round', 'spire', 'flat', 'small', 'column'];
 const TREE_FORM_NAME = { round: '圆冠', spire: '尖塔', flat: '扁冠', small: '小圆冠', column: '柱形' };
 const TREE_SPACING = 34; // 与 app.js 行道树同款间距
-const TREE_OFFSET = 8;   // 路中线两侧 8m（人行道外缘；行人走 4.5–7m，不挡路）
+// 路缘外放（2026-11-27 树 step1 修，毛病②）：树离路中线的距离不再是
+// 固定 8m——roads.js 的主干带面 = width_m × 1.5（半宽 0.75×width_m），
+// 8m 固定值在 14m 宽的路上直接落在带面内（半宽 10.5m）；双向车道内侧
+// 的树还会种到对向车道上。改为按路宽放：offset = 0.75 × width + 路缘。
+// 宽度来源 ROAD_WIDTH_BY_NAME：取自 app/roads.js ROADS_DATA 同名段的
+// 最大 width（同一路名多段宽度不同时取最大，宁可离路远也不许上车道；
+// 生成见 ~/workspace/scratch-tree-step1/width-table.js，ROADS_DATA
+// 只读，未动 roads.js）。S1–S5 虚构街无宽度源，仍用 8m + 路口排掉。
+const TREE_CURB = 2.5; // 路缘外放：带面边 → 树干的距离（含 ±0.6m 抖动余量）
+const TREE_OFFSET = 8; // S1–S5 虚构街仍用 8m（无宽度源，见上）
+const ROAD_WIDTH_BY_NAME = {
+  '丹霞大道': 10.5,
+  '云林东大道': 14,
+  '云林大街': 14,
+  '云林大道': 14,
+  '云林西大道': 10.5,
+  '云武东大道': 10.5,
+  '云武南大街': 10.5,
+  '云武南大道': 14,
+  '云武大道': 14,
+  '云武西大道': 10.5,
+  '云汀大道': 10.5,
+  '云端大道': 14,
+  '云竹东大道': 10.5,
+  '云竹北大道': 10.5,
+  '云竹南大街': 14,
+  '云竹南大道': 10.5,
+  '云锦东大道': 10.5,
+  '云锦北大街': 10.5,
+  '云锦北大道': 14,
+  '云锦西大道': 10.5,
+  '华兴东大街': 14,
+  '华兴东大道': 14,
+  '华兴南大道': 10.5,
+  '华兴西大街': 10.5,
+  '华兴西大道': 14,
+  '双星东大街': 14,
+  '双星东大道': 10.5,
+  '双星北大道': 10.5,
+  '双星南大道': 14,
+  '双星大道': 10.5,
+  '听涛东大街': 14,
+  '听涛东大道': 14,
+  '听涛大道': 17.5,
+  '听涛西大道': 10.5,
+  '夜澜大街': 10.5,
+  '夜澜大道': 14,
+  '天穹大道': 14,
+  '天穹路': 10.5,
+  '幻昼大道': 10.5,
+  '彩虹大街': 14,
+  '彩虹大道': 14,
+  '星云大道': 14,
+  '星云路': 14,
+  '星江东大街': 14,
+  '星江东大道': 14,
+  '星江北大道': 14,
+  '星江大道': 14,
+  '星江西大道': 10.5,
+  '星泽东大道': 10.5,
+  '星泽北大道': 10.5,
+  '星泽南大道': 14,
+  '星泽西大街': 10.5,
+  '星泽西大道': 14,
+  '星澜大道': 10.5,
+  '星火大道': 10.5,
+  '星环东大道': 17.5,
+  '星环北大街': 10.5,
+  '星环北大道': 14,
+  '星环南大道': 10.5,
+  '星野大道': 7,
+  '晨星大道': 10.5,
+  '晨曦大道': 10.5,
+  '曜石大道': 14,
+  '月曜大道': 17.5,
+  '月澜大道': 10.5,
+  '望星东大街': 14,
+  '望星东大道': 10.5,
+  '望星北大道': 10.5,
+  '望星大道': 14,
+  '望星环线': 14,
+  '望星西大道': 14,
+  '极光大道': 10.5,
+  '橙光大道': 10.5,
+  '泽新东大道': 7,
+  '泽新北大道': 14,
+  '泽新南大道': 14,
+  '泽新大道': 14,
+  '泽新西大道': 10.5,
+  '流星大道': 10.5,
+  '灯塔大道': 10.5,
+  '灯影南大街': 14,
+  '灯影南大道': 14,
+  '灯影南路': 10.5,
+  '灯影西大街': 14,
+  '灯影西大道': 10.5,
+  '环星大道': 14,
+  '璇玑大道': 7,
+  '白塔大道': 10.5,
+  '碧波大道': 10.5,
+  '穹顶大道': 10.5,
+  '粉黛大道': 10.5,
+  '紫气东大街': 10.5,
+  '紫气东大道': 21,
+  '紫气东路': 7,
+  '紫气大道': 14,
+  '紫藤大道': 10.5,
+  '紫霄大道': 28,
+  '红枫大道': 14,
+  '绿野大道': 14,
+  '翠竹大道': 14,
+  '舞阳大街': 10.5,
+  '花火大道': 10.5,
+  '蓝鲸大道': 14,
+  '金桂大道': 14,
+  '铁光东大道': 10.5,
+  '铁光北大道': 10.5,
+  '铁光南大道': 10.5,
+  '铁光西大道': 10.5,
+  '银河大道': 10.5,
+  '锦鲤大道': 14,
+  '雨巷大道': 10.5,
+  '雪绒大道': 10.5,
+  '雾桥大道': 21,
+  '霓光大道': 10.5,
+  '霓虹东大道': 14,
+  '霓虹北大街': 10.5,
+  '霓虹北大道': 10.5,
+  '霓虹南大道': 14,
+  '霓虹大道': 14,
+  '霓虹西大道': 10.5,
+  '霓裳大道': 14,
+  '霜叶大道': 14,
+  '青云东大街': 10.5,
+  '青云东大道': 14,
+  '青云东路': 10.5,
+  '青云西大街': 14,
+  '青云西大道': 10.5,
+  '青瓷大道': 14,
+  '青石东大道': 10.5,
+  '青石北大街': 10.5,
+  '青石北大道': 14,
+  '青石北路': 10.5,
+  '青石南大道': 7,
+  '靛蓝大道': 10.5,
+  '风荷大道': 17.5,
+  '风铃大街': 14,
+  '风铃大道': 10.5,
+  '黄鹂大道': 10.5,
+};
+const ROAD_WIDTH_DEFAULT = 14; // 表里没有的路名（按现有表不应发生）：
+  // 用主干最大档 14m 兜底，树离路更远，不许上车道。
+// 带面半宽（m）：roads.js 主干带面 = width_m × 1.5。
+function roadHalf(name) {
+  const w = ROAD_WIDTH_BY_NAME[name] ?? ROAD_WIDTH_DEFAULT;
+  return w * 0.75;
+}
 // 树冠几何（原点在地面，树干高 2.4m 同款；冠形即种的区别）——街树与园树共用
 function makeCanopyGeo(THREE_, species) {
   let g;
@@ -3127,12 +3305,200 @@ function hashName(name) {
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   return h;
 }
+// ---------- 树用地高（2026-11-27 树 step1 修，毛病①） ----------
+// 根因有二：① MAIN_STREETS 的 y 列（段端 ay/by）不可信——M640 起
+// 1,802 段的 y 是 660–1014（同名路在 ROADS_DATA 里是 -18～+20），
+// 旧代码“与地面高差 >40m 就用桥面高”等于把树种到 700–1000m 天上，
+// 已删掉：树高永远取地面高，不取段端 y。② sixLoader.groundHeightAt
+// 只射地形瓦片组，地形瓦片按相机流式加载（TERRAIN_R 6000m），建树时
+// 远处瓦片还没到就回 3.0 或上次缓存值；而肉眼地面在那时是 app.js
+// buildSix 的兜底平面（70000×70000，y = -2.5，0xe8e9ea）或粗坯
+// fabric 表面。所以树高只认“肉眼地面”：地形瓦片命中就用瓦片高，
+// 否则用 -2.5；瓦片随后加载进来（或粗坯表面更高）时由 reseatTrees
+// 再扶正（每 4 秒，相机附近）。
+const FALLBACK_GROUND_Y = -2.5; // app.js buildSix 兜底面 y（0xe8e9ea 平面）
+let _groundRay = null;          // 树用地高射线（只射地形瓦片组，便宜）
+let _fabricRay = null;          // 粗坯射线（贵，只在 reseat 里限量用）
+const _groundCache = new Map(); // 'x,z' -> 地形瓦片高（命中才记；未命中不记）
+function terrainHeightAt(x, z, fresh = false) {
+  const k = x + ',' + z;
+  if (!fresh) {
+    const hit = _groundCache.get(k);
+    if (hit !== undefined) return hit;
+  }
+  let y = null;
+  try {
+    const six = ctx && ctx.sixLoader;
+    if (six && six.terrainGroup) {
+      if (!_groundRay) _groundRay = new ctx.THREE.Raycaster();
+      _groundRay.set(new ctx.THREE.Vector3(x, 400, z), new ctx.THREE.Vector3(0, -1, 0));
+      _groundRay.far = 500;
+      const hits = _groundRay.intersectObjects(six.terrainGroup.children, false);
+      if (hits.length) y = hits[0].point.y;
+    }
+  } catch (e) { /* fall through */ }
+  if (y !== null && isFinite(y) && !fresh) _groundCache.set(k, y);
+  return y;
+}
+function fabricHeightAt(x, z) {
+  // 粗坯表面高：fabric 是单块大网格，射一次贵，只在 reseat 里限量调。
+  // 取最低命中点（地面，不是粗坯楼顶）。
+  try {
+    const six = ctx && ctx.sixLoader;
+    const mesh = six && six.fabricMesh;
+    if (!mesh) return null;
+    if (!_fabricRay) _fabricRay = new ctx.THREE.Raycaster();
+    _fabricRay.set(new ctx.THREE.Vector3(x, 400, z), new ctx.THREE.Vector3(0, -1, 0));
+    _fabricRay.far = 500;
+    const hits = _fabricRay.intersectObject(mesh, false);
+    if (!hits.length) return null;
+    let low = Infinity;
+    for (const h of hits) if (h.point.y < low) low = h.point.y;
+    return isFinite(low) ? low : null;
+  } catch (e) { return null; }
+}
+function groundAtTree(x, z) {
+  const t = terrainHeightAt(x, z);
+  if (t !== null) return t;
+  return FALLBACK_GROUND_Y;
+}
+// ---------- 白膜树冠 + 扶正登记（毛病③ + 毛病①续） ----------
+// 毛病③根因：window.__street 没暴露 setDisplay，app.js 的白膜广播
+// （window[k].setDisplay）调不到 street.js，树一直是绿的。
+// 白膜树色（2026-11-27 参考站新标准，旧“深灰圆团”作废）：白膜下树冠
+// 白/浅灰团块 + 白圆锥——各树种保持自己的几何（尖塔种仍是圆锥，只变
+// 白，不统一换圆冠），实例色逐棵白/浅灰 4 档；树干留白（setDisplay
+// 白膜分支已把树干实例色刷白）。冠下深灰阴影靠标准材质受光自然形成
+// （冠底面受光少，本来就深），不另加几何。
+const TREE_WHITE_GREYS = [0xf2f0ea, 0xe9e7e0, 0xdcdde0, 0xefe9dc]; // 白/浅灰 4 档
+const treeCanopies = [];    // {mesh, geo}：街树 + 园树的全部树冠 mesh
+const treeReseatGroups = []; // {trees: [{x,z,y,s,rot,trunkMesh,trunkIdx,canopyMesh,canopyIdx}]}
+function applyTreeWhite(on) {
+  if (!treeCanopies.length) return;
+  const c = new THREE.Color();
+  for (const rec of treeCanopies) {
+    const mesh = rec.mesh;
+    // 几何不动：各树种保持自己的冠形（尖塔圆锥仍是圆锥，只变白）；
+    // 只换实例色。默认模式恢复时凭 origInstanceColors 拿回绿。
+    if (on) {
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.setColorAt(i, c.setHex(TREE_WHITE_GREYS[i % TREE_WHITE_GREYS.length]));
+      }
+    } else {
+      const cols = origInstanceColors.get(mesh.uuid);
+      if (cols) for (const [i, hex] of cols) mesh.setColorAt(+i, c.setHex(hex));
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+}
+let reseatTimer = 0;
+let reseatLastTx = null, reseatLastTz = null, reseatIdlePasses = 0;
+function reseatTrees() {
+  if (!group || !ctx || !treeReseatGroups.length) return;
+  const cam = ctx.camera;
+  if (!cam) return;
+  const tx = cam.position.x, tz = cam.position.z;
+  // 相机没动过、上一轮 0 改动：跳过（瓦片没进出，树高不会变）
+  if (reseatLastTx !== null && Math.hypot(tx - reseatLastTx, tz - reseatLastTz) < 500 && reseatIdlePasses >= 1) return;
+  reseatLastTx = tx; reseatLastTz = tz;
+  const THREE_ = ctx.THREE;
+  const dummy = new THREE_.Object3D();
+  const R = 5000; // 只扶正相机附近的树
+  const jobs = [];
+  for (const g of treeReseatGroups) {
+    for (const t of g.trees) {
+      const d2 = (t.x - tx) * (t.x - tx) + (t.z - tz) * (t.z - tz);
+      if (d2 <= R * R) jobs.push({ t, d2 });
+    }
+  }
+  jobs.sort((a, b) => a.d2 - b.d2);
+  let changed = 0, fabricUsed = 0;
+  const touched = new Set();
+  for (const { t } of jobs) {
+    let y = terrainHeightAt(t.x, t.z, true); // 瓦片可能刚加载，重算不走旧缓存
+    if (y === null && fabricUsed < 20) { y = fabricHeightAt(t.x, t.z); if (y !== null) fabricUsed++; }
+    if (y === null) y = FALLBACK_GROUND_Y;
+    if (Math.abs(y - t.y) <= 0.3) continue;
+    t.y = y;
+    dummy.position.set(t.x, t.y, t.z);
+    dummy.rotation.set(0, t.rot, 0);
+    dummy.scale.setScalar(t.s);
+    dummy.updateMatrix();
+    t.trunkMesh.setMatrixAt(t.trunkIdx, dummy.matrix);
+    t.canopyMesh.setMatrixAt(t.canopyIdx, dummy.matrix);
+    touched.add(t.trunkMesh); touched.add(t.canopyMesh);
+    changed++;
+  }
+  for (const m of touched) m.instanceMatrix.needsUpdate = true;
+  reseatIdlePasses = changed === 0 ? reseatIdlePasses + 1 : 0;
+  return changed;
+}
 function buildTrees() {
   const THREE_ = ctx.THREE;
   // 先算点位：每条街一种树形，两侧同种
   const perSpecies = { round: [], spire: [], flat: [], small: [], column: [] };
   const perStreet = {};
-  // S1–S5 五条街（原有，种按街序轮换，地面高逐棵 raycast——只 220 棵）
+  // ---- 路口/重叠排掉：路带空间哈希（250m 格），候选树逐棵验 ----
+  // 一棵树除了离自己的路够远，还必须离其它任何路的带面够远（对向车道、
+  // 平行路、交叉路都算）；只排除同一条路的相邻续段（共端点）。
+  const roadGrid = new Map();
+  const roadSegs = [];
+  const GRID = 250;
+  function gridAdd(seg) {
+    roadSegs.push(seg);
+    const x0 = Math.min(seg.ax, seg.bx) - 30, x1 = Math.max(seg.ax, seg.bx) + 30;
+    const z0 = Math.min(seg.az, seg.bz) - 30, z1 = Math.max(seg.az, seg.bz) + 30;
+    for (let cx = Math.floor(x0 / GRID); cx <= Math.floor(x1 / GRID); cx++) {
+      for (let cz = Math.floor(z0 / GRID); cz <= Math.floor(z1 / GRID); cz++) {
+        const k = cx + ',' + cz;
+        if (!roadGrid.has(k)) roadGrid.set(k, []);
+        roadGrid.get(k).push(roadSegs.length - 1);
+      }
+    }
+    return seg;
+  }
+  // S1–S5 也进网格（带面半宽按 10.5m 级主干 nominal 7.875m；
+  // 虚构街无宽度源，只用于排掉路口/交叉，不决定偏移）
+  const S_HALF = (10.5 * 1.5) / 2;
+  const sSegs = {};
+  for (const seg of STREET_SEGMENTS) {
+    sSegs[seg.id] = gridAdd({ ax: seg.a[0], az: seg.a[1], bx: seg.b[0], bz: seg.b[1], half: S_HALF, name: seg.id });
+  }
+  MAIN_STREETS.forEach((s) => {
+    gridAdd({ ax: s[2], az: s[3], bx: s[5], bz: s[6], half: roadHalf(s[1]), name: s[1] });
+  });
+  function segDist(px, pz, sg) {
+    const dx = sg.bx - sg.ax, dz = sg.bz - sg.az;
+    const l2 = dx * dx + dz * dz || 1;
+    let t = ((px - sg.ax) * dx + (pz - sg.az) * dz) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (sg.ax + dx * t), pz - (sg.az + dz * t));
+  }
+  function sharesEndpoint(a, b) {
+    return (Math.hypot(a.ax - b.ax, a.az - b.az) < 2 || Math.hypot(a.ax - b.bx, a.az - b.bz) < 2 ||
+      Math.hypot(a.bx - b.ax, a.bz - b.az) < 2 || Math.hypot(a.bx - b.bx, a.bz - b.bz) < 2);
+  }
+  function clearOfOtherRoads(x, z, ownSeg) {
+    const cx = Math.floor(x / GRID), cz = Math.floor(z / GRID);
+    const seen = new Set();
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const list = roadGrid.get((cx + dx) + ',' + (cz + dz));
+        if (!list) continue;
+        for (const i of list) {
+          if (seen.has(i)) continue;
+          seen.add(i);
+          const sg = roadSegs[i];
+          if (sg === ownSeg) continue;
+          if (sharesEndpoint(sg, ownSeg)) continue;
+          if (segDist(x, z, sg) < sg.half + 2.0) return false;
+        }
+      }
+    }
+    return true;
+  }
+  let droppedOnRoad = 0;
+  // S1–S5 五条街（原有，种按街序轮换；地面高逐棵取肉眼地面）
   const streets = STREET_SEGMENTS.filter((s) => !s.id.startsWith('X'));
   streets.forEach((seg, si) => {
     const species = TREE_SPECIES[si % TREE_SPECIES.length];
@@ -3142,59 +3508,51 @@ function buildTrees() {
     const nx = -dz / len, nz = dx / len;
     const n = Math.max(1, Math.floor(len / TREE_SPACING));
     const list = [];
+    const ownSeg = sSegs[seg.id];
     for (let i = 0; i <= n; i++) {
       const t = (i + 0.5) / n;
       for (const side of [-1, 1]) {
         const jx = (rnd() - 0.5) * 1.2, jz = (rnd() - 0.5) * 1.2;
         const x = seg.a[0] + dx * t + nx * side * TREE_OFFSET + jx;
         const z = seg.a[1] + dz * t + nz * side * TREE_OFFSET + jz;
-        const p = { x, z, y: groundY(x, z), s: 0.85 + rnd() * 0.4, rot: rnd() * Math.PI * 2 };
+        if (!clearOfOtherRoads(x, z, ownSeg)) { droppedOnRoad++; continue; }
+        const p = { x, z, y: groundAtTree(x, z), s: 0.85 + rnd() * 0.4, rot: rnd() * Math.PI * 2 };
         list.push(p);
         perSpecies[species].push(p);
       }
     }
     perStreet[seg.id] = { species, form: TREE_FORM_NAME[species], count: list.length };
   });
-  // 全城主干（本轮新增）：MAIN_STREETS 2,441 段 / 138 条具名主干 / 920.2km。
-  // 同街同种：种按路名哈希定（同一条路的双向/多段同种），两侧同种；种的区别
-  // 只靠树形，绿仍是 app.js 同款 HSL 绿系。
-  // 地面高（小修）：段端 y 是 roads pts[2]，含桥面高（2 路口径）——高架段旁的
-  // 树按它种会浮在桥面高上。改取 six-loader.groundHeightAt 的地面高：每段端
-  // 只采一次（端点去重，2,441 段 → 约 2,755 个独立端点），段内沿地面高插值；
-  // 不逐棵 raycast——54k 棵 raycast 会把 init 拖垮。
-  // 兜底：地形瓦片未到时 groundHeightAt 回 3.0；与桥面高差 >40m 时不可信
-  // （远郊山路桥面 y 可达 700–1000m，地面与路面基本同高），该棵仍用桥面高
-  // 插值。城内高架桥面高 ≤ 约 27m，差值 <40m，走地面高。
-  const groundCache = new Map(); // 'x,z' -> 地面高（段端去重）
-  function groundAt(x, z) {
-    const k = x + ',' + z;
-    let g = groundCache.get(k);
-    if (g === undefined) { g = groundY(x, z); groundCache.set(k, g); }
-    return g;
-  }
+  // 全城主干（本轮）：MAIN_STREETS 2,441 段 / 138 条具名主干。
+  // 同街同种：种按路名哈希定（同一条路的双向/多段同种），两侧同种。
+  // 偏移按路宽（带面半宽 + 路缘 2.5m），不再是固定 8m；
+  // 地面高取段端肉眼地面高插值——段端 y 不可信（见地面一节），
+  // 树高永远不取段端 y；段内逐棵不再 raycast，扶正由 reseatTrees 做。
   const mainByName = {};
   MAIN_STREETS.forEach((s, pi) => {
     const name = s[1];
     const species = TREE_SPECIES[hashName(name) % TREE_SPECIES.length];
     const rnd = mulberry32(0x7EE5 + pi * 7919);
-    const ax = s[2], az = s[3], ay = s[4], bx = s[5], bz = s[6], by = s[7];
+    const ax = s[2], az = s[3], bx = s[5], bz = s[6];
     const dx = bx - ax, dz = bz - az;
     const len = Math.hypot(dx, dz);
     if (len < 1) return;
     const nx = -dz / len, nz = dx / len;
     const n = Math.max(1, Math.floor(len / TREE_SPACING));
-    const gyA = groundAt(ax, az), gyB = groundAt(bx, bz);
+    const off = roadHalf(name) + TREE_CURB;
+    const ownSeg = roadSegs[STREET_SEGMENTS.length + pi];
+    const gyA = groundAtTree(ax, az), gyB = groundAtTree(bx, bz);
     let cnt = 0;
     for (let i = 0; i <= n; i++) {
       const t = (i + 0.5) / n;
       for (const side of [-1, 1]) {
         const jx = (rnd() - 0.5) * 1.2, jz = (rnd() - 0.5) * 1.2;
-        const deckY = ay + (by - ay) * t;
-        const gndY = gyA + (gyB - gyA) * t;
+        const x = ax + dx * t + nx * side * off + jx;
+        const z = az + dz * t + nz * side * off + jz;
+        if (!clearOfOtherRoads(x, z, ownSeg)) { droppedOnRoad++; continue; }
         const p = {
-          x: ax + dx * t + nx * side * TREE_OFFSET + jx,
-          z: az + dz * t + nz * side * TREE_OFFSET + jz,
-          y: deckY - gndY > 40 ? deckY : gndY,
+          x, z,
+          y: gyA + (gyB - gyA) * t,
           s: 0.85 + rnd() * 0.4, rot: rnd() * Math.PI * 2,
         };
         perSpecies[species].push(p);
@@ -3213,9 +3571,11 @@ function buildTrees() {
   trunkGeo.translate(0, 1.2, 0);
   const trunks = new THREE_.InstancedMesh(trunkGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 1 }), total);
   const trunkCols = new Map();
+  const trunkBase = {};
   let ti = 0;
-  for (const list of Object.values(perSpecies)) {
-    for (const p of list) {
+  for (const species of TREE_SPECIES) {
+    trunkBase[species] = ti;
+    for (const p of perSpecies[species]) {
       dummy.position.set(p.x, p.y, p.z);
       dummy.rotation.set(0, p.rot, 0);
       dummy.scale.setScalar(p.s);
@@ -3233,6 +3593,7 @@ function buildTrees() {
   group.add(trunks);
   // 树冠：一种树形一个 InstancedMesh（5 个 draw call），绿用 app.js 同款 HSL 绿系
   const counts = {};
+  const canopyMeshes = {};
   for (const species of TREE_SPECIES) {
     const list = perSpecies[species];
     if (!list.length) continue;
@@ -3259,9 +3620,22 @@ function buildTrees() {
     origInstanceColors.set(mesh.uuid, cols);
     mesh.frustumCulled = false;
     group.add(mesh);
+    treeCanopies.push({ mesh, geo: mesh.geometry });
+    canopyMeshes[species] = mesh;
     counts[species] = list.length;
   }
-  return { total, perStreet, perSpecies: counts, mainRoads: Object.keys(mainByName).length, mainPieces: MAIN_STREETS.length };
+  // 扶正登记：reseatTrees 按棵扶正（树干 + 树冠两个实例一起改）
+  const reseatList = [];
+  for (const species of TREE_SPECIES) {
+    const list = perSpecies[species];
+    const cm = canopyMeshes[species];
+    if (!cm) continue;
+    list.forEach((p, i) => {
+      reseatList.push({ x: p.x, z: p.z, y: p.y, s: p.s, rot: p.rot, trunkMesh: trunks, trunkIdx: trunkBase[species] + i, canopyMesh: cm, canopyIdx: i });
+    });
+  }
+  treeReseatGroups.push({ trees: reseatList });
+  return { total, perStreet, perSpecies: counts, mainRoads: Object.keys(mainByName).length, mainPieces: MAIN_STREETS.length, droppedOnRoad };
 }
 
 // ---------- ⑤ 红灯笼：青石双巷 / 灯影里 / 星光里 ----------
@@ -3583,30 +3957,45 @@ function buildBikes() {
   place(ebikeMesh, ebikes);
   return { bike: bikes.length, ebike: ebikes.length, total: spots.length };
 }
-function buildBusStops() {
+const busStopState = { total: 0, placed: 0, source: 'six-bus-stops-v2', loaded: false };
+// 公交站台（2026-11-27 老大拍板：OSM highway=bus_stop 真实点位，带站台棚）：
+// data/six-bus-stops-v2.json（six-bus-stops-v2，900 条；已用同一 PBF 独立重筛核过，
+// 坐标/站名/区属零差异；朝向已按最近地面车行道重算，roadDist 中位 7.2m）。
+// 点位就是 OSM 节点原位，不挪；棚开口朝路面、长边平行于路（heading_shelter，
+// 与路段方向 heading 差中位 90°）。站台棚用 shelterGeo（柱子+顶+背板+长椅，
+// 尺寸按方案 4m×1.5m×2.7m）。
+// 不摆逐站招牌面：900 面 plane = +900 draw call，且“环线”通用字无真实信息。
+async function loadBusStops() {
+  let list = null;
+  try {
+    const res = await fetch('../data/six-bus-stops-v2.json');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    list = data.stops || [];
+  } catch (e) {
+    console.warn('[street] 公交站表加载失败，站台不摆', e);
+    return busStopState;
+  }
+  if (!group) return busStopState;
   const THREE_ = ctx.THREE;
-  // 2 座公交站：S1 中段（星泽大道口）+ S3 中段（纵街），逐处定点。
-  const stops = [
-    { x: 500, z: -775, heading: Math.PI / 2, line: '环线' },
-    { x: 1155.7, z: -850, heading: 0, line: '环线' },
-  ];
+  // 尺寸按方案 4m（长）×1.5m（深）×2.7m（高）：实测 2.2×1.2×2.49 按长 ×1.82、深 ×1.25、高 ×1.08 放大，柱子顶到顶板里不留缝。
   const shelterGeo = mergeGeometries([
-    box(0.08, 2.4, 0.08, -0.9, 1.2, -0.9),
-    box(0.08, 2.4, 0.08, 0.9, 1.2, -0.9),
-    box(2.2, 0.08, 1.2, 0, 2.45, 0),
-    box(2.0, 1.2, 0.05, 0, 1.5, -0.95),
-    box(1.8, 0.08, 0.4, 0, 0.5, -0.7),
-    box(0.08, 0.5, 0.35, -0.7, 0.25, -0.7),
-    box(0.08, 0.5, 0.35, 0.7, 0.25, -0.7),
+    box(0.15, 2.66, 0.1, -1.64, 1.33, -1.13),
+    box(0.15, 2.66, 0.1, 1.64, 1.33, -1.13),
+    box(4.0, 0.09, 1.5, 0, 2.66, 0),
+    box(3.64, 1.3, 0.06, 0, 1.63, -1.19),
+    box(3.27, 0.09, 0.5, 0, 0.54, -0.88),
+    box(0.15, 0.54, 0.44, -1.27, 0.27, -0.88),
+    box(0.15, 0.54, 0.44, 1.27, 0.27, -0.88),
   ]);
-  const mesh = new THREE_.InstancedMesh(shelterGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.3 }), stops.length);
+  const mesh = new THREE_.InstancedMesh(shelterGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.3 }), list.length);
   const c = new THREE_.Color();
   const dummy = new THREE_.Object3D();
   const colors = new Map();
   const cols = [0x1B2340, 0x14532D];
-  stops.forEach((p, i) => {
+  list.forEach((p, i) => {
     dummy.position.set(p.x, groundY(p.x, p.z), p.z);
-    dummy.rotation.set(0, p.heading, 0);
+    dummy.rotation.set(0, p.heading_shelter ?? p.heading, 0);
     dummy.scale.set(1, 1, 1);
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
@@ -3616,20 +4005,22 @@ function buildBusStops() {
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   origInstanceColors.set(mesh.uuid, colors);
+  _shelterMesh = mesh;
+  // D12：若本站已在白膜模式下才加载完（异步 fetch 后于 setDisplay），直接按白膜灰刷，不留深蓝
+  if (displayMode === 'white') {
+    for (let i = 0; i < list.length; i++) mesh.setColorAt(i, c.setHex(SHELTER_WHITE_GREY));
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
   mesh.frustumCulled = false;
   group.add(mesh);
-  // 站牌：通用字“环线”，无品牌无线路号以外的信息。
-  stops.forEach((p) => {
-    const tex = signTexture(p.line, '#00F0FF');
-    const mat = new THREE_.MeshBasicMaterial({ map: tex, transparent: true });
-    shopSignMats.push(mat);
-    const plane = new THREE_.Mesh(new THREE_.PlaneGeometry(1.1, 0.28), mat);
-    plane.position.set(p.x, groundY(p.x, p.z) + 2.2, p.z);
-    plane.rotation.y = p.heading;
-    group.add(plane);
-    neonMeshes.push(plane);
-  });
-  return { stops: stops.length };
+  busStopState.total = list.length;
+  busStopState.placed = list.length;
+  busStopState.loaded = true;
+  return busStopState;
+}
+function buildBusStops() {
+  loadBusStops(); // 异步：站表到了就按 OSM 真实点位摆 900 座棚（不阻塞启动）
+  return busStopState; // 同一对象：loader 改完后读到的就是最新数
 }
 function buildVendors() {
   const THREE_ = ctx.THREE;
@@ -3768,33 +4159,123 @@ function buildManholes() {
   return { manholes: spots.length };
 }
 
-// ---------- ⑧ 地铁站：233 站，一个不许空（16:36 令：“还我马路上的地铁站”） ----------
-// 站位来源（不猜）：chengdu-city/data/metro.json 368 站（x/z 与白模同坐标系，
-// 星泽广场原点）→ district-polygons.json 六区多边形点内过滤 = 233 站，
-// 与白模分块索引 shards 合计 stations=233、entrances=572、entrances_est=446
+// ---------- ⑧ 地铁站：234 站，一个不许空（16:36 令：“还我马路上的地铁站”） ----------
+// 站位来源（不猜）：chengdu-city/data/metro.json 369 站（x/z 与白模同坐标系，
+// 星泽广场原点）→ district-polygons.json 六区多边形点内过滤 = 234 站，
+// 与白模分块索引 shards 合计 stations=234、entrances=573、entrances_est=446
 // 三数一致（six-index.json counts 同数）。站位即 GLB 里 12×12×4m 灰色站体
 // （build_six.py:1571 prism [0.55,0.55,0.60]）的位置；本站厅 12.4m 筏板盖住
 // 它、4.8m 顶盖过它的顶（4.4m），灰盒子不再露在外面——站是真的站样子，
 // 不是只放标记。参考站（digital-twin-sandbox）那边：reference-watch §5.1
 // 写明站的搭法未见（文字版只 16 行、无站截图/清单），所以不抄参考站的站，
 // 按通用地铁出入口做法 + 我们自己的游戏画面风格搭：站厅 + 玻璃前脸 +
-// 悬挑雨棚 + 台阶 + 站牌杆。站牌只用 six-names.json 里的虚构名——
-// six-names.json 只有 districts + landmarks 两键，没有任何站名映射，
-// 233 站全部缺名：站牌板先空着（空白板，不写字），缺名清单报总协调；
-// 绝不用真成都站名、绝不自己编新虚构名（见 METRO_MISSING_NAMES=233）。
+// 悬挑雨棚 + 台阶 + 站牌杆。站牌名用 OSM 真名（见 loadStationNames）。
 // 摆法：每站一个出入口综合体，锚在站 x/z；换乘站（≥2 条线，68 站）
 // 再加第二个（第二口在 150m 内实测口成簇 ≥25m 处，否则在站点对侧 16m）。
-// 朝向：130 站朝 150m 内最近 OSM 实测口（临街面），其余 103 站种子定死
-// （mulberry32 种子 0x5EED，与站序一一对应，不随机飘）。
-// 合批：站厅 / 台阶 / 站牌杆 / 霓虹檐条各一个 InstancedMesh，301 个综合体
+// 朝向（2026-11-27 103 站核对后）：234 站主口全部朝临街面——131 站朝 150m 内
+// 最近 OSM 实测口（2026-11-27 D3 补升仙湖：最近实测口为 B 口 16.4m，朝向 -2.74）；103 站（最近实测口 >150m，原种子朝向）已改朝：5 站朝 151–300m
+// 内最近实测口（磨子桥/民乐/锦城大道/华西坝/人民公园·孪生口），98 站朝本站最近
+// 推算口（metro-entrances-estimated-v1，本站自己的口，中位 42m）。推算口未核对：
+// 27 站最近两口距离差 <10m 且方向差 >60°，朝向待推算口百度核对后复查。
+// 第二口：对侧 16m 的朝向 = 主口 + π（20 个，随主口改）；实测口成簇处的
+// 第二口（48 个）朝向未动，另案核。
+// 合批：站厅 / 台阶 / 站牌杆 / 霓虹檐条各一个 InstancedMesh，302 个综合体
 // 只加 4 个 draw call。白膜：站厅/台阶/站牌杆走 origInstanceColors 恢复，
 // 霓虹檐条进 neonMeshes（白膜收起）。
+// 站牌名（2026-11-27 老大拍板：用 OSM 真名，不用虚构映射）：
+// data/six-station-names.json（six-station-names-v1，234 条，缺失 0 条），
+// 表里的 i 就是 234 条主口（second==0）的站序号，x/z 与本站零偏差，
+// 按 i 取名不会串。10 个名字各出现两次（红牌楼、火车南站等）是 OSM 里
+// 真实的同名双节点（同一换乘站两条线的两个站节点，坐标和线路都不同），
+// 不是错误。站牌用 stationSignTexture 把真名画到站牌板上（loadStationNames
+// 异步接线，见 init；加载失败站牌留空，缺名数见 window.__street.stationNames）。
 // 表格式：[x, z, 朝向弧度, 是否第二口, 线路（数字串，如 '49'=4/9号线，仅统计用，不上牌）]
+// 站名牌：与 signTexture 同款（深底 + 霓虹字），字号按名字长度自适应
+// （最长 7 字：茶店子客运站 / 川大望江校区 / 金沙滨河公园 / 中医大·省医院）。
+function stationSignTexture(word) {
+  const cv = document.createElement('canvas');
+  cv.width = 512; cv.height = 128;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#0B1026';
+  g.fillRect(0, 0, 512, 128);
+  g.strokeStyle = '#00F0FF';
+  g.lineWidth = 6;
+  g.strokeRect(6, 6, 500, 116);
+  let size = 64;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  const font = (s) => `bold ${s}px "PingFang SC","Microsoft YaHei",sans-serif`;
+  g.font = font(size);
+  while (g.measureText(word).width > 460 && size > 28) { size -= 4; g.font = font(size); }
+  g.shadowColor = '#00F0FF';
+  g.shadowBlur = 28;
+  g.fillStyle = '#00F0FF';
+  g.fillText(word, 256, 68);
+  g.fillText(word, 256, 68);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+// 站名接线：读 data/six-station-names.json，按主口序号 i 取名，画到站牌板上。
+// 站牌板在站厅实例的局部坐标 (7.0, 3.4, 6.8)，板面朝局部 +Z（临街面）；
+// 平面按站朝向旋转后贴到板前 0.09m（D11 修：板半厚 0.07，0.09 留 0.02 空隙；
+// 旧代码把平面放在板中心、埋在板里，站名从正反两面都看不见）。表里每条都按 x/z 与本站核对，
+// 对不上的那站留空（不把别站的名字贴上来），缺名数记 stationNameState。
+async function loadStationNames() {
+  let list = null;
+  try {
+    const res = await fetch('../data/six-station-names.json');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    list = data.stations || [];
+  } catch (e) {
+    console.warn('[street] 站名表加载失败，站牌留空', e);
+    return stationNameState;
+  }
+  if (!group) return stationNameState;
+  const THREE_ = ctx.THREE;
+  // 主口（second==0）按 METRO_STATIONS 顺序排，与表里 i 一一对应
+  const mains = METRO_STATIONS.filter((st) => st[3] === 0);
+  const byI = new Map(list.map((r) => [r.i, r]));
+  let signed = 0;
+  mains.forEach((st, j) => {
+    const rec = byI.get(j);
+    if (!rec || typeof rec.name !== 'string' || !rec.name) return;
+    if (Math.abs(rec.x - st[0]) > 0.5 || Math.abs(rec.z - st[1]) > 0.5) {
+      console.warn('[street] 站名表第 ' + j + ' 条坐标对不上本站，留空', rec);
+      return;
+    }
+    const [x, z, heading] = st;
+    const gy = groundY(x, z);
+    const ch = Math.cos(heading), sh = Math.sin(heading);
+    // 局部 (7.0, 6.8) 经绕 Y 旋转到世界坐标（与 totem 实例同一旋转）
+    const wx = x + 7.0 * ch + 6.8 * sh;
+    const wz = z - 7.0 * sh + 6.8 * ch;
+    const tex = stationSignTexture(rec.name);
+    const mat = new THREE_.MeshBasicMaterial({ map: tex, transparent: true });
+    shopSignMats.push(mat);
+    const plane = new THREE_.Mesh(new THREE_.PlaneGeometry(1.7, 0.42), mat);
+    // D11 修：沿板面法向 (sin h, cos h) 外推 0.09m，平面贴在板前不埋板里
+    plane.position.set(wx + Math.sin(heading) * 0.09, gy + 3.4, wz + Math.cos(heading) * 0.09);
+    plane.rotation.y = heading;
+    group.add(plane);
+    // D11 修：站名牌不再进 neonMeshes——它是寻路信息不是霓虹装饰，白膜模式
+    // 也要留着（白膜规范：站牌上写真站名）；进 neonMeshes 会在默认白膜视图里
+    // 把 234 块牌全藏起来。若老大要白膜纯白无字，改回本行即可（一行）。
+    signed++;
+  });
+  stationNameState.loaded = true;
+  stationNameState.signed = signed;
+  stationNameState.missing = METRO_STATION_COUNT - signed;
+  return stationNameState;
+}
 const METRO_STATIONS = [
-[-6819.6,6537.3,1.48,0,'2'],[-8781.5,2363.3,1.12,0,'49'],[-8744.2,2286.0,2.69,1,'49'],[6590.7,304.0,3.11,0,'7'],[962.3,-6455.5,1.18,0,'7'],[-5232.0,-2774.6,0.42,0,'7'],[-5648.5,-1164.0,1.99,0,'177'],[-5678.2,-1116.5,-0.56,1,'177'],[-5656.2,-179.1,1.6,0,'137'],[-5653.3,-244.3,3.1,1,'137'],[-3564.9,-3034.3,0.89,0,'103'],[-3577.3,-3044.4,-2.25,1,'103'],[-1475.6,-3105.1,-2.43,0,'3'],[808.2,-2767.9,1.23,0,'3'],[724.9,-2033.9,2.31,0,'133'],[696.1,-1958.8,-0.37,1,'133'],[-1635.5,306.2,-1.02,0,'4'],[-5529.8,1068.9,-2.54,0,'47'],[-5548.9,1122.0,-0.35,1,'47'],[-4396.0,-4093.3,1.61,0,'1037'],[-4464.0,-4153.0,-2.29,1,'1037'],[6910.5,-3674.3,-0.84,0,'27'],[6922.5,-3684.9,2.3,1,'27'],[2475.2,3637.9,-2.01,0,'37'],[2425.4,3675.5,-0.92,1,'37'],[1139.5,-990.4,1.06,0,'23'],[1087.8,-1088.8,-2.66,1,'23'],[-4496.6,2893.9,1.94,0,'27'],[-4556.9,2865.2,-2.02,1,'27'],[-2565.2,397.9,1.06,0,'245'],[-2502.0,382.5,1.81,1,'245'],[-32.6,-5224.1,-1.51,0,'1'],[6900.0,-1510.0,0.92,0,'47'],[6851.2,-1587.4,-2.58,1,'47'],[-7052.2,-3935.2,2.64,0,'3'],[-9327.3,-5126.8,3.02,0,'3'],[-5821.8,-4333.2,1.4,0,'3'],[1577.1,-207.8,-0.27,0,'34'],[1609.6,-200.1,1.34,1,'34'],[-6318.8,-7049.1,1.34,0,'109'],[-6408.8,-7017.1,-1.23,1,'109'],[-7870.9,-4342.0,-0.99,0,'39'],[-7942.7,-4346.4,-1.63,1,'39'],[-898.2,2556.8,-2.42,0,'56'],[-887.6,2568.8,0.72,1,'56'],[-4499.5,871.1,-1.49,0,'4'],[-3737.3,724.0,2.17,0,'4'],[2325.9,1732.2,-0.77,0,'36'],[2337.0,1720.7,2.37,1,'36'],[2200.4,952.9,0.94,0,'3'],[-3167.5,-5116.9,-1.35,0,'78'],[-3162.7,-5019.6,0.05,1,'78'],[4274.4,-3201.2,2.56,0,'28'],[4265.6,-3187.9,-0.59,1,'28'],[1452.6,12035.6,0.4,0,'5'],[704.7,12043.3,2.26,0,'5'],[-800.5,8836.6,0.7,0,'5'],[-870.4,7464.8,1.83,0,'5'],[-863.7,6506.4,1.0,0,'275'],[-950.8,6604.8,-0.72,1,'275'],[-736.3,5738.1,2.57,0,'5'],[-237.5,4889.2,-2.31,0,'5'],[-91.0,4237.0,-2.5,0,'5'],[-109.2,3541.7,1.2,0,'57'],[-46.9,3504.1,2.11,1,'57'],[-1795.4,2326.9,2.5,0,'5'],[-2472.4,1556.4,-2.26,0,'5'],[-2549.9,-213.3,0.82,0,'5'],[-2526.0,-1190.5,0.94,0,'175'],[-2572.9,-1182.8,-1.41,1,'175'],[-2415.9,-2544.6,-0.2,0,'35'],[-2412.8,-2560.3,2.94,1,'35'],[-2843.9,-3849.0,2.85,0,'5'],[-2831.4,-4489.0,-2.38,0,'58'],[-2820.4,-4477.4,0.76,1,'58'],[-1850.0,-5870.8,0.87,0,'57'],[-1840.4,-5947.1,3.02,1,'57'],[-1593.3,-7409.5,2.09,0,'5'],[-1627.8,-8044.0,-1.16,0,'305'],[-1613.1,-8050.4,1.98,1,'305'],[-1654.6,-8932.7,2.16,0,'5'],[-2012.7,-10842.9,-1.41,0,'5'],[-1994.5,-12503.2,-1.29,0,'5'],[-1974.4,-13500.3,-1.58,0,'5'],[-5669.6,-5672.9,-2.94,0,'10'],[-9297.7,-7824.0,0.48,0,'10'],[613.8,3652.2,2.95,0,'17'],[505.6,3580.4,-2.16,1,'17'],[546.8,2572.3,-1.54,0,'16'],[562.8,2571.9,1.6,1,'16'],[-186.7,493.0,-1.31,0,'14'],[-142.7,511.8,1.17,1,'14'],[-98.6,-3253.2,1.92,0,'13'],[-148.4,-3237.7,-1.27,1,'13'],[-81.4,-6333.9,-0.53,0,'17'],[-121.6,-6399.2,-2.59,1,'17'],[-65.1,-4164.0,-1.83,0,'1'],[-110.1,-561.5,0.41,0,'12'],[-115.9,-578.1,-2.81,1,'12'],[13.4,1050.1,-0.1,0,'1'],[-129.3,-1442.5,-1.62,0,'1'],[-118.7,-2171.0,1.34,0,'113'],[-141.7,-2121.3,-0.43,1,'113'],[1859.5,6099.6,1.33,0,'127'],[1815.5,6010.1,-2.68,1,'127'],[-121.6,-9628.0,0.89,0,'9'],[-154.2,-10341.0,0.9,0,'1'],[164.7,-10366.4,-0.22,0,'18'],[138.8,-11904.1,1.21,0,'118'],[79.5,-11937.2,-2.08,1,'118'],[-5249.2,1662.5,1.06,0,'7'],[-5816.1,6441.2,-1.27,0,'2'],[-5164.0,5635.3,2.26,0,'2'],[-5287.5,4721.2,-2.3,0,'2'],[-5255.9,3509.6,1.52,0,'227'],[-5271.9,3508.8,-1.62,1,'227'],[4935.1,-2030.6,2.35,0,'4'],[4465.0,-1777.5,2.5,0,'48'],[4399.9,-1759.8,-1.31,1,'48'],[2970.3,-970.5,-2.34,0,'46'],[2981.8,-959.4,0.8,1,'46'],[858.0,247.6,-2.5,0,'4'],[-3624.3,2223.0,-2.11,0,'2'],[-3259.4,1283.4,0.67,0,'2'],[-1831.8,-25.4,-2.38,0,'2'],[-1038.9,-341.6,2.21,0,'172'],[-1051.8,-332.1,-0.93,1,'172'],[-3965.2,6962.9,1.22,0,'6'],[-3405.0,6213.5,-0.67,0,'6'],[-2916.7,5443.0,2.44,0,'276'],[-2927.1,5455.2,-0.7,1,'276'],[-2231.1,4389.5,2.21,0,'6'],[-1691.0,3521.8,-2.9,0,'67'],[-1692.0,3572.7,-0.02,1,'67'],[-1565.6,2985.7,1.75,0,'6'],[1483.2,2194.2,-2.02,0,'6'],[2952.1,1071.1,-2.82,0,'176'],[2976.0,1089.9,0.9,1,'176'],[-5988.4,8208.7,-2.07,0,'6'],[-4380.7,7552.1,2.47,0,'6'],[3306.4,47.5,-1.43,0,'6'],[2482.9,-1875.9,0.96,0,'26'],[2502.0,-1933.3,2.82,1,'26'],[2450.3,-3042.1,2.74,0,'136'],[2444.0,-3027.4,-0.41,1,'136'],[2592.0,-3780.5,-1.1,0,'136'],[2606.2,-3787.8,2.04,1,'136'],[2957.8,-4748.8,-0.38,0,'68'],[2871.6,-4767.6,-1.79,1,'68'],[3012.4,-6059.8,1.32,0,'67'],[2996.9,-6063.8,-1.82,1,'67'],[2931.0,-6851.3,-0.52,0,'6'],[2070.2,-7993.1,-1.08,0,'306'],[2084.3,-8000.6,2.06,1,'306'],[1615.4,-9219.0,-1.2,0,'69'],[1529.2,-9254.4,-1.96,1,'69'],[2776.9,-11552.5,1.4,0,'6'],[2955.9,-12488.8,-2.41,0,'6'],[2952.1,-13646.2,-0.15,0,'6'],[2960.7,-14550.4,-2.74,0,'6'],[2963.6,-15587.2,2.84,0,'6'],[3176.1,-16260.4,1.3,0,'6'],[3229.8,-16974.5,2.8,0,'6'],[2963.6,-17773.7,-0.95,0,'6'],[3050.7,-18513.2,0.3,0,'6'],[1350.1,-17761.6,2.72,0,'1'],[804.3,-16798.8,2.66,0,'1'],[154.2,-13851.8,-0.3,0,'118'],[230.8,-13809.8,1.07,1,'118'],[123.5,-12799.4,-1.6,0,'1'],[-336.1,-8849.8,-3.01,0,'1'],[-339.9,-7557.6,2.72,0,'1'],[7320.4,1833.9,2.72,0,'8'],[6631.9,1096.6,-0.75,0,'78'],[6642.8,1084.9,2.39,1,'78'],[5873.5,644.4,-0.06,0,'8'],[4967.7,183.5,1.65,0,'8'],[4546.4,-846.7,-0.35,0,'8'],[3527.6,-4436.0,-2.12,0,'138'],[3476.8,-4512.2,-2.55,1,'138'],[1947.6,-4753.2,-0.87,0,'8'],[770.8,-4137.5,-1.11,0,'8'],[-1433.4,-4055.7,-0.69,0,'8'],[-1981.1,-3793.7,-1.09,0,'8'],[-3176.1,-6219.0,1.12,0,'8'],[-3197.2,-7092.2,1.31,0,'8'],[-3525.6,-8604.4,0.64,0,'8'],[-3924.9,-8989.1,-1.19,0,'89'],[-4018.8,-9042.2,-2.09,1,'89'],[-9188.5,3944.1,0.35,0,'9'],[-8625.5,-200.1,-0.69,0,'9'],[-8531.6,-1931.1,0.88,0,'179'],[-8612.1,-1927.8,-1.53,1,'179'],[-7363.4,-6109.5,0.14,0,'9'],[-5278.9,-7883.7,2.13,0,'9'],[-1634.5,-9652.4,1.56,0,'59'],[-1650.5,-9652.5,-1.58,1,'59'],[509.4,-9590.5,0.68,0,'9'],[-9871.2,-2322.4,-1.29,0,'17'],[2053.0,14197.8,-2.64,0,'5'],[1987.8,12632.5,-0.04,0,'5'],[1908.4,-1597.3,-0.88,0,'2'],[3850.2,-2753.6,1.76,0,'2'],[5290.4,-3662.2,-2.78,0,'2'],[7627.7,-4160.7,1.5,0,'2'],[8618.8,-6370.4,2.84,0,'2'],[5591.0,2029.5,-2.11,0,'177'],[5593.0,2085.9,0.04,1,'177'],[-3456.7,3750.6,-2.62,0,'7'],[-2548.0,3765.0,2.64,0,'7'],[3760.2,3493.1,0.46,0,'7'],[30.6,-6578.2,0.62,0,'18'],[4684.3,-5870.8,2.15,0,'137'],[4666.1,-5898.4,-2.56,1,'137'],[6236.4,-4539.9,-0.54,0,'7'],[5455.1,-5116.9,0.09,0,'7'],[6867.4,-2713.8,-0.8,0,'7'],[6611.8,-557.1,-0.64,0,'7'],[4834.6,2680.6,0.51,0,'7'],[-973.8,3549.4,-2.39,0,'7'],[-6573.5,1560.8,1.69,0,'4'],[-9878.9,1215.9,3.08,0,'4'],[-11690.5,791.5,3.14,0,'4'],[-13843.1,1300.0,-1.41,0,'4'],[-14680.0,1679.1,-1.71,0,'4'],[2610.2,2960.3,0.82,0,'3'],[2826.6,4479.1,-1.01,0,'3'],[3426.1,5640.9,-1.1,0,'3'],[3890.5,6966.2,0.91,0,'3'],[4467.9,9064.3,-2.34,0,'3'],[-7051.3,2980.2,2.85,0,'27'],[11612.0,6001.2,1.27,0,'8'],[-6308.2,2629.7,-0.71,0,'27'],[-5706.9,2759.1,-0.4,0,'27'],[-2247.3,5994.6,1.29,0,'27'],[-1609.6,6650.1,-2.11,0,'27'],[-4250.5,4630.5,1.24,0,'27'],[-3565.9,5043.9,-2.13,0,'27'],[129.3,6022.2,-0.27,0,'27'],[829.2,5565.7,-3.04,0,'27'],[2065.4,7752.2,-0.3,0,'27'],[3035.4,9938.7,-2.12,0,'27'],[3338.0,10799.8,-2.12,0,'27'],[3281.5,11890.8,-0.35,0,'27'],[3269.0,12612.6,-2.68,0,'27'],[8031.8,2760.2,-2.98,0,'8'],[8637.9,3504.1,-0.42,0,'8'],[9336.9,4350.9,0.68,0,'8'],[9854.9,5455.1,1.29,0,'8'],[10694.7,5997.9,0.61,0,'8'],[1807.8,6104.0,-0.58,0,'127'],[1923.7,6115.1,1.48,1,'127'],[-787.1,6568.3,-2.61,0,'275'],[-779.0,6582.1,0.53,1,'275'],[12199.0,3049.8,-2.4,0,'17'],[10741.6,2959.2,2.35,0,'17'],[9392.5,2884.0,-1.29,0,'17'],[7988.7,3097.3,1.32,0,'17'],[6312.1,2790.0,-0.38,0,'17'],[3899.1,1390.6,-2.0,0,'17'],[2219.6,1246.9,1.68,0,'173'],[2178.4,1264.6,-1.17,1,'173'],[1185.4,1842.7,1.94,0,'17'],[-824.4,1286.7,2.5,0,'17'],[-1136.6,-435.5,2.14,0,'172'],[-1150.1,-426.9,-1.01,1,'172'],[-1461.2,-1073.3,0.29,0,'1317'],[-1493.8,-1086.6,-1.96,1,'1317'],[-3391.6,-1290.0,3.14,0,'17'],[-4488.9,-1183.9,1.84,0,'17'],[-6816.7,-1452.5,1.86,0,'17'],[5689.7,-6870.1,-0.57,0,'1330'],[5698.3,-6883.6,2.57,1,'1330'],[6918.2,-7754.4,-1.29,0,'13'],[8176.4,-8648.6,-0.83,0,'13'],[-3557.2,-3055.3,0.84,0,'103'],[-3569.2,-3065.9,-2.3,1,'103'],[-1538.8,-1925.6,0.83,0,'10'],[-2447.5,-2256.1,0.61,0,'105'],[-2466.6,-2299.2,-2.72,1,'105'],[7236.1,-5476.2,-3.04,0,'30'],[6720.0,-6254.4,-0.94,0,'30'],[5854.4,-6927.5,1.84,0,'1330'],[5839.0,-6923.2,-1.3,1,'1330'],[4436.3,-7384.1,-2.4,0,'30'],[3360.0,-7527.8,1.64,0,'30'],[784.2,-8149.0,-1.56,0,'30'],[211.6,-8178.9,-0.64,0,'30'],[-674.1,-8174.4,0.1,0,'30'],[-1488.0,-8192.1,-3.09,0,'305'],[-1487.1,-8176.1,0.05,1,'305'],[-2654.3,-8237.4,1.85,0,'30'],[-3289.1,-8681.8,1.73,0,'30'],[-978.6,-1496.7,2.72,0,'13'],[-299.7,-2001.9,-1.24,0,'13'],[1978.3,-2551.3,-2.98,0,'13'],[-3532.3,-1.1,2.13,0,'13'],[-4375.9,-26.5,2.07,0,'13'],[-7140.3,-116.1,-1.26,0,'13'],[-11383.2,-29.8,1.96,0,'13'],[-9965.1,82.9,-1.7,0,'13'],
+[-6819.6,6537.3,1.48,0,'2'],[-8781.5,2363.3,1.12,0,'49'],[-8744.2,2286.0,2.69,1,'49'],[6590.7,304.0,3.11,0,'7'],[962.3,-6455.5,1.18,0,'7'],[-5232.0,-2774.6,0.42,0,'7'],[-5648.5,-1164.0,1.99,0,'177'],[-5678.2,-1116.5,-0.56,1,'177'],[-5656.2,-179.1,1.6,0,'137'],[-5653.3,-244.3,3.1,1,'137'],[-3564.9,-3034.3,-0.61,0,'103'],[-3577.3,-3044.4,2.53,1,'103'],[-1475.6,-3105.1,-1.91,0,'3'],[808.2,-2767.9,-3.02,0,'3'],[724.9,-2033.9,2.31,0,'133'],[696.1,-1958.8,-0.37,1,'133'],[-1635.5,306.2,-1.02,0,'4'],[-5529.8,1068.9,-2.54,0,'47'],[-5548.9,1122.0,-0.35,1,'47'],[-4396.0,-4093.3,1.61,0,'1037'],[-4464.0,-4153.0,-2.29,1,'1037'],[6910.5,-3674.3,0.28,0,'27'],[6922.5,-3684.9,-2.86,1,'27'],[2475.2,3637.9,-2.01,0,'37'],[2425.4,3675.5,-0.92,1,'37'],[1139.5,-990.4,1.06,0,'23'],[1087.8,-1088.8,-2.66,1,'23'],[-4496.6,2893.9,1.94,0,'27'],[-4556.9,2865.2,-2.02,1,'27'],[-2565.2,397.9,1.06,0,'245'],[-2502.0,382.5,1.81,1,'245'],[-32.6,-5224.1,-1.51,0,'1'],[6900.0,-1510.0,0.92,0,'47'],[6851.2,-1587.4,-2.58,1,'47'],[-7052.2,-3935.2,-1.43,0,'3'],[-9327.3,-5126.8,-1.88,0,'3'],[-5821.8,-4333.2,1.4,0,'3'],[1577.1,-207.8,-0.27,0,'34'],[1609.6,-200.1,1.34,1,'34'],[-6318.8,-7049.1,1.34,0,'109'],[-6408.8,-7017.1,-1.23,1,'109'],[-7870.9,-4342.0,-0.99,0,'39'],[-7942.7,-4346.4,-1.63,1,'39'],[-898.2,2556.8,1.47,0,'56'],[-887.6,2568.8,-1.67,1,'56'],[-4499.5,871.1,1.77,0,'4'],[-3737.3,724.0,-1.44,0,'4'],[2325.9,1732.2,-1.08,0,'36'],[2337.0,1720.7,2.06,1,'36'],[2200.4,952.9,0.94,0,'3'],[-3167.5,-5116.9,-1.35,0,'78'],[-3162.7,-5019.6,0.05,1,'78'],[4274.4,-3201.2,-0.5,0,'28'],[4265.6,-3187.9,2.64,1,'28'],[1452.6,12035.6,0.4,0,'5'],[704.7,12043.3,2.26,0,'5'],[-800.5,8836.6,0.7,0,'5'],[-870.4,7464.8,1.83,0,'5'],[-863.7,6506.4,1.0,0,'275'],[-950.8,6604.8,-0.72,1,'275'],[-736.3,5738.1,2.57,0,'5'],[-237.5,4889.2,-2.24,0,'5'],[-91.0,4237.0,-3.08,0,'5'],[-109.2,3541.7,1.2,0,'57'],[-46.9,3504.1,2.11,1,'57'],[-1795.4,2326.9,-2.06,0,'5'],[-2472.4,1556.4,-2.26,0,'5'],[-2549.9,-213.3,0.82,0,'5'],[-2526.0,-1190.5,0.94,0,'175'],[-2572.9,-1182.8,-1.41,1,'175'],[-2415.9,-2544.6,-0.2,0,'35'],[-2412.8,-2560.3,2.94,1,'35'],[-2843.9,-3849.0,-2.57,0,'5'],[-2831.4,-4489.0,1.38,0,'58'],[-2820.4,-4477.4,-1.76,1,'58'],[-1850.0,-5870.8,0.87,0,'57'],[-1840.4,-5947.1,3.02,1,'57'],[-1593.3,-7409.5,1.14,0,'5'],[-1627.8,-8044.0,1.82,0,'305'],[-1613.1,-8050.4,-1.32,1,'305'],[-1654.6,-8932.7,0.24,0,'5'],[-2012.7,-10842.9,-1.41,0,'5'],[-1994.5,-12503.2,1.56,0,'5'],[-1974.4,-13500.3,0.08,0,'5'],[-5669.6,-5672.9,-2.94,0,'10'],[-9297.7,-7824.0,0.48,0,'10'],[613.8,3652.2,2.95,0,'17'],[505.6,3580.4,-2.16,1,'17'],[546.8,2572.3,0.77,0,'16'],[562.8,2571.9,-2.37,1,'16'],[-186.7,493.0,-1.31,0,'14'],[-142.7,511.8,1.17,1,'14'],[-98.6,-3253.2,1.92,0,'13'],[-148.4,-3237.7,-1.27,1,'13'],[-81.4,-6333.9,-0.53,0,'17'],[-121.6,-6399.2,-2.59,1,'17'],[-65.1,-4164.0,-1.83,0,'1'],[-110.1,-561.5,0.41,0,'12'],[-115.9,-578.1,-2.81,1,'12'],[13.4,1050.1,-0.1,0,'1'],[-129.3,-1442.5,-1.62,0,'1'],[-118.7,-2171.0,1.34,0,'113'],[-141.7,-2121.3,-0.43,1,'113'],[1859.5,6099.6,1.33,0,'127'],[1815.5,6010.1,-2.68,1,'127'],[-121.6,-9628.0,0.89,0,'9'],[-154.2,-10341.0,0.18,0,'1'],[164.7,-10366.4,-0.22,0,'18'],[138.8,-11904.1,1.21,0,'118'],[79.5,-11937.2,-2.08,1,'118'],[-5249.2,1662.5,1.06,0,'7'],[-5816.1,6441.2,-0.92,0,'2'],[-5164.0,5635.3,2.26,0,'2'],[-5287.5,4721.2,-2.3,0,'2'],[-5255.9,3509.6,2.99,0,'227'],[-5271.9,3508.8,-0.15,1,'227'],[4935.1,-2030.6,-0.7,0,'4'],[4465.0,-1777.5,2.5,0,'48'],[4399.9,-1759.8,-1.31,1,'48'],[2970.3,-970.5,-0.32,0,'46'],[2981.8,-959.4,2.82,1,'46'],[858.0,247.6,0.24,0,'4'],[-3624.3,2223.0,2.17,0,'2'],[-3259.4,1283.4,0.67,0,'2'],[-1831.8,-25.4,-2.38,0,'2'],[-1038.9,-341.6,2.21,0,'172'],[-1051.8,-332.1,-0.93,1,'172'],[-3965.2,6962.9,-0.66,0,'6'],[-3405.0,6213.5,-0.67,0,'6'],[-2916.7,5443.0,0.21,0,'276'],[-2927.1,5455.2,-2.93,1,'276'],[-2231.1,4389.5,-1.04,0,'6'],[-1691.0,3521.8,-2.9,0,'67'],[-1692.0,3572.7,-0.02,1,'67'],[-1565.6,2985.7,1.12,0,'6'],[1483.2,2194.2,-1.01,0,'6'],[2952.1,1071.1,-2.82,0,'176'],[2976.0,1089.9,0.9,1,'176'],[-5988.4,8208.7,-1.05,0,'6'],[-4380.7,7552.1,-1.66,0,'6'],[3306.4,47.5,2.28,0,'6'],[2482.9,-1875.9,0.96,0,'26'],[2502.0,-1933.3,2.82,1,'26'],[2450.3,-3042.1,1.31,0,'136'],[2444.0,-3027.4,-1.83,1,'136'],[2592.0,-3780.5,3.05,0,'136'],[2606.2,-3787.8,-0.09,1,'136'],[2957.8,-4748.8,-0.38,0,'68'],[2871.6,-4767.6,-1.79,1,'68'],[3012.4,-6059.8,1.32,0,'67'],[2996.9,-6063.8,-1.82,1,'67'],[2931.0,-6851.3,-0.52,0,'6'],[2070.2,-7993.1,-0.76,0,'306'],[2084.3,-8000.6,2.38,1,'306'],[1615.4,-9219.0,-1.2,0,'69'],[1529.2,-9254.4,-1.96,1,'69'],[2776.9,-11552.5,-1.05,0,'6'],[2955.9,-12488.8,-2.41,0,'6'],[2952.1,-13646.2,0.19,0,'6'],[2960.7,-14550.4,-2.74,0,'6'],[2963.6,-15587.2,2.84,0,'6'],[3176.1,-16260.4,2.59,0,'6'],[3229.8,-16974.5,0.24,0,'6'],[2963.6,-17773.7,3.09,0,'6'],[3050.7,-18513.2,0.03,0,'6'],[1350.1,-17761.6,2.72,0,'1'],[804.3,-16798.8,2.66,0,'1'],[154.2,-13851.8,-0.3,0,'118'],[230.8,-13809.8,1.07,1,'118'],[123.5,-12799.4,-1.6,0,'1'],[-336.1,-8849.8,-3.01,0,'1'],[-339.9,-7557.6,2.72,0,'1'],[7320.4,1833.9,2.72,0,'8'],[6631.9,1096.6,-0.75,0,'78'],[6642.8,1084.9,2.39,1,'78'],[5873.5,644.4,-0.06,0,'8'],[4967.7,183.5,1.65,0,'8'],[4546.4,-846.7,-0.35,0,'8'],[3527.6,-4436.0,-2.12,0,'138'],[3476.8,-4512.2,-2.55,1,'138'],[1947.6,-4753.2,-0.87,0,'8'],[770.8,-4137.5,1.91,0,'8'],[-1433.4,-4055.7,-0.69,0,'8'],[-1981.1,-3793.7,-0.42,0,'8'],[-3176.1,-6219.0,1.12,0,'8'],[-3197.2,-7092.2,1.57,0,'8'],[-3525.6,-8604.4,-2.43,0,'8'],[-3924.9,-8989.1,-1.19,0,'89'],[-4018.8,-9042.2,-2.09,1,'89'],[-9188.5,3944.1,0.35,0,'9'],[-8625.5,-200.1,-0.69,0,'9'],[-8531.6,-1931.1,0.88,0,'179'],[-8612.1,-1927.8,-1.53,1,'179'],[-7363.4,-6109.5,0.14,0,'9'],[-5278.9,-7883.7,-2.07,0,'9'],[-1634.5,-9652.4,2.77,0,'59'],[-1650.5,-9652.5,-0.37,1,'59'],[509.4,-9590.5,2.97,0,'9'],[-9871.2,-2322.4,-1.29,0,'17'],[2053.0,14197.8,3.05,0,'5'],[1987.8,12632.5,0.43,0,'5'],[1908.4,-1597.3,-1.38,0,'2'],[3850.2,-2753.6,-1.22,0,'2'],[5290.4,-3662.2,-2.78,0,'2'],[7627.7,-4160.7,1.5,0,'2'],[8618.8,-6370.4,2.84,0,'2'],[5591.0,2029.5,-2.11,0,'177'],[5593.0,2085.9,0.04,1,'177'],[-3456.7,3750.6,-2.62,0,'7'],[-2548.0,3765.0,2.64,0,'7'],[3760.2,3493.1,0.46,0,'7'],[30.6,-6578.2,0.62,0,'18'],[4684.3,-5870.8,2.15,0,'137'],[4666.1,-5898.4,-2.56,1,'137'],[6236.4,-4539.9,-0.54,0,'7'],[5455.1,-5116.9,0.09,0,'7'],[6867.4,-2713.8,-0.8,0,'7'],[6611.8,-557.1,-0.64,0,'7'],[4834.6,2680.6,0.51,0,'7'],[-973.8,3549.4,-2.39,0,'7'],[-6573.5,1560.8,1.69,0,'4'],[-9878.9,1215.9,3.08,0,'4'],[-11690.5,791.5,3.14,0,'4'],[-13843.1,1300.0,-1.41,0,'4'],[-14680.0,1679.1,-1.71,0,'4'],[2610.2,2960.3,-2.5,0,'3'],[2826.6,4479.1,-1.01,0,'3'],[3426.1,5640.9,-1.1,0,'3'],[3890.5,6966.2,0.91,0,'3'],[4467.9,9064.3,-2.34,0,'3'],[-7051.3,2980.2,0.56,0,'27'],[11612.0,6001.2,3.02,0,'8'],[-6308.2,2629.7,0.83,0,'27'],[-5706.9,2759.1,-2.47,0,'27'],[-2247.3,5994.6,1.29,0,'27'],[-1609.6,6650.1,-1.71,0,'27'],[-4250.5,4630.5,-1.97,0,'27'],[-3565.9,5043.9,-1.96,0,'27'],[129.3,6022.2,-0.59,0,'27'],[829.2,5565.7,2.15,0,'27'],[2065.4,7752.2,-2,0,'27'],[3035.4,9938.7,0,0,'27'],[3338.0,10799.8,-2.2,0,'27'],[3281.5,11890.8,-0.26,0,'27'],[3269.0,12612.6,-2.85,0,'27'],[8031.8,2760.2,1.78,0,'8'],[8637.9,3504.1,2.97,0,'8'],[9336.9,4350.9,0.58,0,'8'],[9854.9,5455.1,-2.33,0,'8'],[10694.7,5997.9,0.28,0,'8'],[1807.8,6104.0,-0.58,0,'127'],[1923.7,6115.1,1.48,1,'127'],[-787.1,6568.3,-2.61,0,'275'],[-779.0,6582.1,0.53,1,'275'],[12199.0,3049.8,-2.4,0,'17'],[10741.6,2959.2,-2.36,0,'17'],[9392.5,2884.0,-0.85,0,'17'],[7988.7,3097.3,-2.29,0,'17'],[6312.1,2790.0,2.34,0,'17'],[3899.1,1390.6,-2.0,0,'17'],[2219.6,1246.9,1.68,0,'173'],[2178.4,1264.6,-1.17,1,'173'],[1185.4,1842.7,1.94,0,'17'],[-824.4,1286.7,2.5,0,'17'],[-1136.6,-435.5,1.31,0,'172'],[-1150.1,-426.9,-1.83,1,'172'],[-1461.2,-1073.3,0.29,0,'1317'],[-1493.8,-1086.6,-1.96,1,'1317'],[-3391.6,-1290.0,3.14,0,'17'],[-4488.9,-1183.9,1.84,0,'17'],[-6816.7,-1452.5,1.86,0,'17'],[5689.7,-6870.1,2.31,0,'1330'],[5698.3,-6883.6,-0.83,1,'1330'],[6918.2,-7754.4,-1.24,0,'13'],[8176.4,-8648.6,-1.8,0,'13'],[-3557.2,-3055.3,-2.05,0,'103'],[-3569.2,-3065.9,1.09,1,'103'],[-1538.8,-1925.6,0.36,0,'10'],[-2447.5,-2256.1,0.61,0,'105'],[-2466.6,-2299.2,-2.72,1,'105'],[7236.1,-5476.2,-0.72,0,'30'],[6720.0,-6254.4,1.13,0,'30'],[5854.4,-6927.5,-1.35,0,'1330'],[5839.0,-6923.2,1.79,1,'1330'],[4436.3,-7384.1,1.36,0,'30'],[3360.0,-7527.8,1.12,0,'30'],[784.2,-8149.0,0.69,0,'30'],[211.6,-8178.9,2.82,0,'30'],[-674.1,-8174.4,-0.77,0,'30'],[-1488.0,-8192.1,-1.43,0,'305'],[-1487.1,-8176.1,1.71,1,'305'],[-2654.3,-8237.4,1.9,0,'30'],[-3289.1,-8681.8,1.96,0,'30'],[-978.6,-1496.7,2.72,0,'13'],[-299.7,-2001.9,-1.18,0,'13'],[1978.3,-2551.3,1.7,0,'13'],[-3532.3,-1.1,-2.12,0,'13'],[-4375.9,-26.5,0.86,0,'13'],[-7140.3,-116.1,2.42,0,'13'],[-11383.2,-29.8,1.96,0,'13'],[-9965.1,82.9,-1.7,0,'13'],[1521.3,4653.4,-2.74,0,'1'],
 ];
-const METRO_STATION_COUNT = 233;
-const METRO_MISSING_NAMES = 233; // six-names.json 无站名映射，233 站站牌全空
+const METRO_STATION_COUNT = 234;
+const METRO_MISSING_NAMES = 0; // 站名表已接线（six-station-names.json，234 条全有），缺名 0；
+  // 加载失败时站牌留空，缺名数见 window.__street.stationNames
+const stationNameState = { total: METRO_STATION_COUNT, signed: 0, missing: METRO_STATION_COUNT, source: 'six-station-names-v1', loaded: false };
 function buildMetroStations() {
   const THREE_ = ctx.THREE;
   const rnd = mulberry32(0x5EED);
@@ -3815,7 +4296,8 @@ function buildMetroStations() {
     box(0.18, 3.6, 0.18, 0, 2.1, 4.9),
     box(0.18, 3.6, 0.18, 4, 2.1, 4.9),
   ]);
-  const hall = new THREE_.InstancedMesh(hallGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.25 }), n);
+  const hallMat = new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.55, metalness: 0.25 });
+  const hall = new THREE_.InstancedMesh(hallGeo, hallMat, n);
   const hallCols = new Map();
   const hallPalette = [0x2C4A6B, 0x35586B, 0x3A5A7A, 0x2E3E5C];
   // 台阶：筏板前缘 3 级下到地面（每级 0.15m，宽 7m）
@@ -3827,13 +4309,16 @@ function buildMetroStations() {
   const steps = new THREE_.InstancedMesh(stepsGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }), n);
   const stepsCols = new Map();
   const stepsPalette = [0x6B7280, 0x7A7F8A, 0x5B6470];
-  // 站牌杆：杆 + 空白板 + 压顶（板上无字——缺名，等总协调给虚构名再上字）
+  // 站牌杆：杆 + 站牌板 + 压顶（板上画 OSM 真站名，见 loadStationNames）
   const totemGeo = mergeGeometries([
     box(0.2, 4.4, 0.2, 7.0, 2.2, 6.8),
     box(1.8, 2.4, 0.14, 7.0, 3.4, 6.8),
     box(2.0, 0.15, 0.3, 7.0, 4.7, 6.8),
   ]);
-  const totem = new THREE_.InstancedMesh(totemGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.3 }), n);
+  const totemMat = new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.3 });
+  const totem = new THREE_.InstancedMesh(totemGeo, totemMat, n);
+  // D14：站厅/站牌材质记下来，白膜下金属度置 0 用
+  _whiteMetalMats.push({ mat: hallMat, rough: 0.55, metal: 0.25 }, { mat: totemMat, rough: 0.5, metal: 0.3 });
   const totemCols = new Map();
   // 霓虹檐条：檐口下一道亮条（夜里亮，白膜收起）
   const glowGeo = box(12.6, 0.14, 0.14, 0, 3.72, 5.32);
@@ -3867,14 +4352,16 @@ function buildMetroStations() {
   }
   neonMeshes.push(glow); // 白膜收起；站厅/台阶/站牌杆白膜变白不断
   const second = METRO_STATIONS.filter((s) => s[3] === 1).length;
-  const headingFromEntrance = 130; // 150m 内有 OSM 实测口的站数（算表时数出）
+  const headingFromEntrance = 136; // 朝 OSM 实测口的站数：131 站（150m 内）+ 5 站（151–300m 内）
+  const headingFromEstimated = 98; // 朝推算口的站数（本站自己的最近推算口）
   return {
     stations: METRO_STATION_COUNT,
     complexes: n,
     second,
     missingNames: METRO_MISSING_NAMES,
     headingFromEntrance,
-    headingSeeded: METRO_STATION_COUNT - headingFromEntrance,
+    headingFromEstimated,
+    headingSeeded: METRO_STATION_COUNT - headingFromEntrance - headingFromEstimated, // 0：种子朝向已清零
     drawCalls: 4, // 站厅 + 台阶 + 站牌杆 + 霓虹檐条，各 1 个 InstancedMesh
   };
 }
@@ -3883,6 +4370,215 @@ function buildMetroStations() {
 // 做法：环路（16 段弧形路块围成环）＋十字园路（2 条）＋中心广场铺装＋两环树阵
 // ＋沿路行道树＋入口门（双柱＋横梁，通用形制，不是亭子）。园界半径见 PARK_GARDENS。
 // 树种一园一种（望星圆冠 / 云锦扁冠 / 艺术小圆冠 / 熊猫苑柱形），绿与树干同街树口径。
+// 6 名园里的另 2 个（地标点，无 PARK_GARDENS 园子）：听涛草堂=杜甫草堂、铁光记忆园=东郊记忆
+const POINT_PARKS = [
+  { id: 'L05', name: '听涛草堂', x: -3884.7, z: -334.9, r: 150 },
+  { id: 'L06', name: '铁光记忆园', x: 5870.6, z: 651.1, r: 150 },
+];
+const parkLeisureState = { total: 0, osm: 0, seeded: 0, source: 'six-park-leisure-v3', loaded: false };
+// 健身/游乐器械接线：读 six-park-leisure.json，健身器材一组、游乐设施一组，摆进公园。
+// OSM 点按原位摆（source=osm）；种子摆位按表里坐标摆（source=seeded，非 OSM）。
+async function loadParkLeisure() {
+  let data = null;
+  try {
+    const res = await fetch('../data/six-park-leisure.json');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (e) {
+    console.warn('[street] 公园器械表加载失败，器械不摆', e);
+    return parkLeisureState;
+  }
+  if (!group) return parkLeisureState;
+  const THREE_ = ctx.THREE;
+  const items = data.items || [];
+  const parksById = new Map((data.parks || []).map((p) => [p.id, p]));
+  const fit = items.filter((s) => s.kind === 'fitness_station');
+  const play = items.filter((s) => s.kind === 'playground');
+  const c = new THREE_.Color();
+  const dummy = new THREE_.Object3D();
+  // 健身一组：单杠架 + 双杠 + 仰卧板（示意尺寸，合并成一个几何）
+  const fitGeo = mergeGeometries([
+    box(0.08, 2.4, 0.08, -1.1, 1.2, 0), box(0.08, 2.4, 0.08, 1.1, 1.2, 0),
+    box(2.4, 0.08, 0.08, 0, 2.4, 0),
+    box(2.0, 0.08, 0.08, 0, 1.1, -0.35), box(2.0, 0.08, 0.08, 0, 1.1, 0.35),
+    box(0.07, 1.1, 0.07, -0.9, 0.55, -0.35), box(0.07, 1.1, 0.07, 0.9, 0.55, -0.35),
+    box(0.07, 1.1, 0.07, -0.9, 0.55, 0.35), box(0.07, 1.1, 0.07, 0.9, 0.55, 0.35),
+    box(1.6, 0.08, 0.5, 0, 0.55, 1.3, -0.5, 0, 0),
+  ]);
+  // 游乐一组：滑梯 + 秋千架 + 爬梯（示意尺寸，合并成一个几何）
+  const playGeo = mergeGeometries([
+    box(1.0, 0.1, 1.0, -1.2, 1.2, 0),
+    box(0.08, 1.2, 0.08, -1.65, 0.6, -0.45), box(0.08, 1.2, 0.08, -0.75, 0.6, -0.45),
+    box(0.08, 1.2, 0.08, -1.65, 0.6, 0.45), box(0.08, 1.2, 0.08, -0.75, 0.6, 0.45),
+    box(0.5, 0.06, 2.4, -1.2, 0.65, 1.2, -0.5, 0, 0),
+    cyl(0.05, 0.05, 2.2, 0.6, 1.1, 0, 6), cyl(0.05, 0.05, 2.2, 2.4, 1.1, 0, 6),
+    box(2.0, 0.08, 0.08, 1.5, 2.2, 0),
+    box(0.5, 0.05, 0.25, 1.1, 1.0, 0), box(0.5, 0.05, 0.25, 1.9, 1.0, 0),
+    cyl(0.015, 0.015, 1.2, 1.1, 1.6, -0.1, 4), cyl(0.015, 0.015, 1.2, 1.1, 1.6, 0.1, 4),
+    cyl(0.015, 0.015, 1.2, 1.9, 1.6, -0.1, 4), cyl(0.015, 0.015, 1.2, 1.9, 1.6, 0.1, 4),
+    box(1.6, 0.06, 0.06, 0, 1.8, -1.5), box(1.6, 0.06, 0.06, 0, 1.8, -0.9),
+    box(0.06, 0.06, 0.66, -0.6, 1.8, -1.2), box(0.06, 0.06, 0.66, 0, 1.8, -1.2), box(0.06, 0.06, 0.66, 0.6, 1.8, -1.2),
+    box(0.06, 1.8, 0.06, -0.75, 0.9, -1.5), box(0.06, 1.8, 0.06, 0.75, 0.9, -1.5),
+    box(0.06, 1.8, 0.06, -0.75, 0.9, -0.9), box(0.06, 1.8, 0.06, 0.75, 0.9, -0.9),
+  ]);
+  const placeKind = (list, geo, palette) => {
+    if (!list.length) return 0;
+    const mesh = new THREE_.InstancedMesh(geo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7, metalness: 0.2 }), list.length);
+    const cols = new Map();
+    list.forEach((p, i) => {
+      let heading = 0;
+      if (p.source === 'seeded' && p.park && parksById.get(p.park)) {
+        const pk = parksById.get(p.park);
+        heading = Math.atan2(p.x - pk.x, p.z - pk.z);
+      } else {
+        heading = mulberry32(0xF17 + p.i * 131)() * Math.PI * 2;
+      }
+      dummy.position.set(p.x, groundY(p.x, p.z), p.z);
+      dummy.rotation.set(0, heading, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      const hex = palette[i % palette.length];
+      mesh.setColorAt(i, c.setHex(hex));
+      cols.set(i, hex);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    origInstanceColors.set(mesh.uuid, cols);
+    mesh.frustumCulled = false;
+    group.add(mesh);
+    return list.length;
+  };
+  const nf = placeKind(fit, fitGeo, [0x2F6FED, 0xE86A1C, 0x1F2937]);
+  const np = placeKind(play, playGeo, [0xE8402F, 0xFFD166, 0x2F6FED, 0x22A06B]);
+  parkLeisureState.total = items.length;
+  parkLeisureState.osm = items.filter((s) => s.source === 'osm').length;
+  parkLeisureState.seeded = items.filter((s) => s.source === 'seeded').length;
+  parkLeisureState.loaded = true;
+  parkLeisureState.placed = { fitness: nf, playground: np };
+  return parkLeisureState;
+}
+// 公园配套家具：长椅/垃圾桶/路灯/指示牌按街边物件摆法伸进公园（园路两侧 + 环路），
+// 4 个园子 + 2 个地标点园。指示牌带园名牌（1 园 1 面，我们自己的虚构园名）。
+function buildParkFacilities() {
+  const THREE_ = ctx.THREE;
+  const rnd = mulberry32(0x9A9D);
+  const benches = [], bins = [], signs = [], lamps = [], namePlanes = [];
+  const allParks = [...PARK_GARDENS.map((p) => ({ ...p, garden: true })), ...POINT_PARKS.map((p) => ({ ...p, garden: false }))];
+  for (const pk of allParks) {
+    if (pk.garden) {
+      // 十字园路两侧：每 ~90m 一椅（与园树错位，不同分母天然错开）
+      for (const along of [0, 1]) {
+        const n = Math.max(3, Math.floor((2 * pk.r) / 90));
+        for (let i = 0; i < n; i++) {
+          const t = ((i + 0.5) / n) * 2 - 1;
+          for (const side of [-1, 1]) {
+            const off = side * 6;
+            const bx = along === 0 ? pk.x + t * pk.r : pk.x + off;
+            const bz = along === 0 ? pk.z + off : pk.z + t * pk.r;
+            const heading = along === 0 ? Math.PI / 2 : 0;
+            benches.push({ x: bx, z: bz, heading: heading + (rnd() - 0.5) * 0.2, s: 0.9 + rnd() * 0.25 });
+            if ((i * 2 + (side + 1) / 2) % 2 === 0) bins.push({ x: bx + Math.cos(heading) * 2.5, z: bz + Math.sin(heading) * 2.5, heading: 0, s: 0.9 + rnd() * 0.2 });
+          }
+        }
+      }
+      // 环路：4 椅 + 8 灯（每 2 段一灯）
+      for (let k = 0; k < 4; k++) {
+        const a = (k * Math.PI) / 2 + 0.4;
+        benches.push({ x: pk.x + Math.cos(a) * (pk.r * 0.85 + 4.5), z: pk.z + Math.sin(a) * (pk.r * 0.85 + 4.5), heading: a + Math.PI / 2, s: 0.9 + rnd() * 0.25 });
+      }
+      for (let k = 0; k < 16; k += 2) {
+        const a = ((k + 0.5) / 16) * Math.PI * 2;
+        lamps.push({ x: pk.x + Math.cos(a) * pk.r * 0.85, z: pk.z + Math.sin(a) * pk.r * 0.85, heading: 0, s: 1 });
+      }
+      for (const [sx, sz] of [[pk.r - 3, 0], [-(pk.r - 3), 0], [0, pk.r - 3], [0, -(pk.r - 3)]]) {
+        lamps.push({ x: pk.x + sx, z: pk.z + sz, heading: 0, s: 1 });
+      }
+      // 指示牌 2 块：a=0.6 处 + 对侧；园名牌挂第一块上
+      for (const [k, a] of [0, 1].map((k) => [k, 0.6 + k * Math.PI])) {
+        const sx = pk.x + Math.cos(a) * (pk.r - 3), sz = pk.z + Math.sin(a) * (pk.r - 3);
+        signs.push({ x: sx, z: sz, heading: -a + Math.PI / 2, s: 1 });
+        if (k === 0) namePlanes.push({ x: sx, z: sz, heading: -a + Math.PI / 2, word: pk.name });
+      }
+    } else {
+      // 地标点园：园心周围 30m 环 4 椅 2 桶、36m 环 4 灯、1 块指示牌 + 园名牌
+      for (let k = 0; k < 4; k++) {
+        const a = (k * Math.PI) / 2 + 0.3;
+        benches.push({ x: pk.x + Math.cos(a) * 30, z: pk.z + Math.sin(a) * 30, heading: a + Math.PI / 2, s: 0.9 + rnd() * 0.25 });
+        if (k % 2 === 0) bins.push({ x: pk.x + Math.cos(a) * 33, z: pk.z + Math.sin(a) * 33, heading: 0, s: 0.9 + rnd() * 0.2 });
+        lamps.push({ x: pk.x + Math.cos(a + 0.4) * 36, z: pk.z + Math.sin(a + 0.4) * 36, heading: 0, s: 1 });
+      }
+      const a = 0.6;
+      const sx = pk.x + Math.cos(a) * 30, sz = pk.z + Math.sin(a) * 30;
+      signs.push({ x: sx, z: sz, heading: -a + Math.PI / 2, s: 1 });
+      namePlanes.push({ x: sx, z: sz, heading: -a + Math.PI / 2, word: pk.name });
+    }
+  }
+  const c = new THREE_.Color();
+  const m = new THREE_.Matrix4();
+  const q = new THREE_.Quaternion();
+  const e = new THREE_.Euler();
+  const v = new THREE_.Vector3();
+  const sv = new THREE_.Vector3();
+  const place = (mesh, list, colorFn) => {
+    const colors = new Map();
+    list.forEach((p, i) => {
+      e.set(0, p.heading, 0); q.setFromEuler(e);
+      v.set(p.x, groundY(p.x, p.z), p.z);
+      sv.set(p.s, p.s, p.s);
+      m.compose(v, q, sv);
+      mesh.setMatrixAt(i, m);
+      const hex = colorFn(p, i);
+      mesh.setColorAt(i, c.setHex(hex));
+      colors.set(i, hex);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    origInstanceColors.set(mesh.uuid, colors);
+    mesh.frustumCulled = false;
+    group.add(mesh);
+  };
+  const benchGeo = mergeGeometries([
+    box(1.9, 0.09, 0.55, 0, 0.46, 0),
+    box(1.9, 0.5, 0.08, 0, 0.78, -0.26),
+    box(0.08, 0.46, 0.5, -0.8, 0.23, 0),
+    box(0.08, 0.46, 0.5, 0.8, 0.23, 0),
+  ]);
+  const bench = new THREE_.InstancedMesh(benchGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 }), benches.length);
+  place(bench, benches, (p, i) => [0x6B4423, 0x4A5D23, 0x2A3358, 0x5B2E8B, 0x334155][i % 5]);
+  const binGeo = mergeGeometries([
+    cyl(0.32, 0.28, 0.85, 0, 0.43, 0, 10),
+    cyl(0.34, 0.34, 0.06, 0, 0.88, 0, 10),
+  ]);
+  const bin = new THREE_.InstancedMesh(binGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, metalness: 0.4 }), bins.length);
+  place(bin, bins, (p, i) => [0x1B2340, 0x14532D, 0x3F3F46, 0x0F766E][i % 4]);
+  const signGeo = mergeGeometries([
+    cyl(0.05, 0.06, 2.6, 0, 1.3, 0),
+    box(1.5, 0.45, 0.06, 0, 2.5, 0),
+  ]);
+  const sign = new THREE_.InstancedMesh(signGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 }), signs.length);
+  place(sign, signs, (p, i) => [0x00F0FF, 0xFF2E88, 0x8B5CFF, 0xFF9F1C][i % 4]);
+  // 园灯：灯杆 + 灯头（不是红绿灯，园里没有红绿灯）
+  const lampGeo = mergeGeometries([
+    cyl(0.06, 0.08, 4.2, 0, 2.1, 0, 8),
+    box(0.34, 0.18, 0.34, 0, 4.25, 0),
+  ]);
+  const lamp = new THREE_.InstancedMesh(lampGeo, new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.3 }), lamps.length);
+  place(lamp, lamps, () => 0x1F2937);
+  // 园名牌：1 园 1 面
+  namePlanes.forEach((p) => {
+    const tex = signTexture(p.word, '#00F0FF');
+    const mat = new THREE_.MeshBasicMaterial({ map: tex, transparent: true });
+    shopSignMats.push(mat);
+    const plane = new THREE_.Mesh(new THREE_.PlaneGeometry(1.5, 0.38), mat);
+    plane.position.set(p.x, groundY(p.x, p.z) + 2.5, p.z);
+    plane.rotation.y = p.heading;
+    group.add(plane);
+    neonMeshes.push(plane);
+  });
+  loadParkLeisure(); // 异步：器械表到了就摆（不阻塞启动）
+  return { bench: benches.length, bin: bins.length, sign: signs.length, light: lamps.length, namePlanes: namePlanes.length, leisure: parkLeisureState };
+}
 function buildParkGardens() {
   const THREE_ = ctx.THREE;
   const c = new THREE_.Color();
@@ -3933,7 +4629,8 @@ function buildParkGardens() {
       }
     }
     for (const p of treePts) {
-      const tp = { x: p.x, z: p.z, y: gy, s: 0.85 + rnd() * 0.4, rot: rnd() * Math.PI * 2 };
+      // 园树逐棵取肉眼地面（不共用园心高，园子半径 200–330m，地形有起伏）
+      const tp = { x: p.x, z: p.z, y: groundAtTree(p.x, p.z), s: 0.85 + rnd() * 0.4, rot: rnd() * Math.PI * 2, species: pk.species };
       trunks.push(tp);
       canopies[pk.species].push(tp);
     }
@@ -3972,6 +4669,7 @@ function buildParkGardens() {
   place(trunkMesh, trunks, () => 0x6B4A2F);
   // 园树冠：一园一种（最多 4 个 draw call）
   const canopyCounts = {};
+  const parkCanopy = {};
   for (const species of TREE_SPECIES) {
     const list = canopies[species];
     if (!list.length) continue;
@@ -3980,6 +4678,7 @@ function buildParkGardens() {
       new THREE_.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }),
       list.length,
     );
+    parkCanopy[species] = mesh;
     const cols = new Map();
     const rnd = mulberry32(0xC010 + TREE_SPECIES.indexOf(species));
     list.forEach((p, i) => {
@@ -3997,8 +4696,19 @@ function buildParkGardens() {
     origInstanceColors.set(mesh.uuid, cols);
     mesh.frustumCulled = false;
     group.add(mesh);
+    treeCanopies.push({ mesh, geo: mesh.geometry });
     canopyCounts[species] = list.length;
   }
+  // 园树扶正登记（树干索引 = trunks 数组下标；树冠索引 = 同种内第几棵）
+  const parkReseat = [];
+  const parkCanopyIdx = {};
+  trunks.forEach((tp, ti) => {
+    const cm = parkCanopy[tp.species];
+    const ci = parkCanopyIdx[tp.species] ?? 0;
+    parkCanopyIdx[tp.species] = ci + 1;
+    parkReseat.push({ x: tp.x, z: tp.z, y: tp.y, s: tp.s, rot: tp.rot, trunkMesh, trunkIdx: ti, canopyMesh: cm, canopyIdx: ci });
+  });
+  treeReseatGroups.push({ trees: parkReseat });
   // 入口门：双柱＋横梁合并成一个几何（原点在地面，门朝向 +Z），一个 InstancedMesh
   const gateGeo = mergeGeometries([
     box(0.6, 4.5, 0.6, -2.2, 2.25, 0),
@@ -4050,10 +4760,14 @@ export function init(c) {
   const vendors = buildVendors();
   const manholes = buildManholes();
   const metroStations = buildMetroStations();
+  loadStationNames(); // 异步：站名表到了就把真站名画上站牌（不阻塞启动）
   const parkGardens = buildParkGardens();
+  const parkFacilities = buildParkFacilities();
   lastT = performance.now();
   cancelAnimationFrame(rafId);
   rafId = requestAnimationFrame(tick);
+  // 树扶正：地形瓦片流式加载，树高每 4 秒按相机附近重算一次（见 reseatTrees）
+  if (!reseatTimer) reseatTimer = setInterval(reseatTrees, 4000);
   const samples = routeSamples(100);
   window.__street = {
     group,
@@ -4069,12 +4783,17 @@ export function init(c) {
     vendors,
     manholes,
     metroStations,
+    get stationNames() { return stationNameState; },
     parkGardens,
+    parkFacilities,
+    get parkLeisure() { return parkLeisureState; },
     route: samples,
     routeWaypoints: ROUTE_WAYPOINTS,
     refreshLamps: harvestLamps,
+    setDisplay, // 白膜广播入口（2026-11-27 树修：以前没暴露，app.js 调不到，树一直绿）
+    reseatTrees, // 树扶正（探针/验收用）
   };
-  return { group, get lamps() { return lampCount; }, get lampPoles() { return lampPoleCount; }, furniture, shops, trees, lanterns, landmarkStreets, bikes, busStops, vendors, manholes, metroStations, parkGardens, route: samples };
+  return { group, get lamps() { return lampCount; }, get lampPoles() { return lampPoleCount; }, furniture, shops, trees, lanterns, landmarkStreets, bikes, busStops, vendors, manholes, metroStations, parkGardens, parkFacilities, route: samples };
 }
 
 export function setDisplay(mode) {
@@ -4092,6 +4811,26 @@ export function setDisplay(mode) {
     }
     for (const m of neonMeshes) m.visible = false;
     if (lampGlow) lampGlow.material.opacity = 0;
+    // 灯杆/臂/头白膜下留浅灰（LAMP_WHITE_GREY），不跟通用分支走纯白：
+    // 通用分支刚把它们刷成 0xffffff，白杆贴白地面看不见；浅灰细杆才与参考站一致。
+    // rebuildLampPoles 白膜补刷用同一个色，两路一致。
+    if (lampPoles) {
+      for (const m of [lampPoles.poles, lampPoles.arms, lampPoles.heads]) {
+        if (!m || !m.setColorAt) continue;
+        for (let i = 0; i < m.count; i++) m.setColorAt(i, c.setHex(LAMP_WHITE_GREY));
+        if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      }
+    }
+    // D12：公交棚白膜下留深灰色差（SHELTER_WHITE_GREY），不全刷白，航拍/街面可辨认
+    if (_shelterMesh && _shelterMesh.setColorAt) {
+      for (let i = 0; i < _shelterMesh.count; i++) _shelterMesh.setColorAt(i, c.setHex(SHELTER_WHITE_GREY));
+      if (_shelterMesh.instanceColor) _shelterMesh.instanceColor.needsUpdate = true;
+    }
+    // 树冠刷白/浅灰：参考站新标准（2026-11-27）树是白/浅灰团块 + 白圆锥，
+    // 树干保持白色（细浅干，与参考站一致）。
+    applyTreeWhite(true);
+    // D14：站厅/站牌白膜下金属度置 0、粗糙度 0.95（同陶土），背阴面不再被金属度压暗
+    for (const rec of _whiteMetalMats) { rec.mat.metalness = 0; rec.mat.roughness = 0.95; }
   } else {
     for (const [uuid, map] of origInstanceColors) {
       let mesh = null;
@@ -4101,5 +4840,8 @@ export function setDisplay(mode) {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
     for (const m of neonMeshes) m.visible = true;
+    applyTreeWhite(false);
+    // D14：默认模式恢复站厅/站牌原金属度与粗糙度
+    for (const rec of _whiteMetalMats) { rec.mat.metalness = rec.metal; rec.mat.roughness = rec.rough; }
   }
 }

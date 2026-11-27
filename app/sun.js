@@ -74,7 +74,7 @@ let ctx = null, THREE = null;
 let sunLight = null, moonLight = null;
 let sunDisc = null;
 let raf = 0, lastT = 0;
-const S = { preset: 'spring', display: 'normal', hour: 10 };
+const S = { preset: 'winter', display: 'normal', hour: 16.6 }; // D18：默认冬至 16:36（16:36 高度角 15.5°、影长 3.6×楼高；春分 16:36 高度角 35.1°、影长 1.42×，和 10:00 的 1.45× 几乎一样，单改时间没用）
 
 // ---------- 第三段参数：发光窗 PBR + 黄昏（单一来源，weather.js 只读这里） ----------
 // WINDOW_PARAMS：亮窗的全部可调参数。分层亮窗比与成片块尺寸是已验收结构，

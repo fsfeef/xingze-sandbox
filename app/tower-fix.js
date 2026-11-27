@@ -1,13 +1,32 @@
-// 339电视塔修复（E 路 · surpass §3.4②）
-// 程序化重建 339m 塔，盖住六区包里只有 113m 的旧几何；不改包、不拆包。
-// 游戏画面风格配色：冷蓝紫塔身 + 电青 #00F0FF 霓虹环 + 品红 #FF2E88 发光塔尖。
+// 339电视塔重建（2026-11-27 塑形 v2：按实拍剪影，不再是扁盒子/蓝板）
+// 天府熊猫塔（四川广播电视塔 / 锦绣天府塔），总高 339m，成华区猛追湾。
+// 实测尺寸来源（bang.cn 天府熊猫塔介绍 + zh/en Wikipedia 天府熊猫塔）：
+//   塔高 339m；天线桅杆 87.5m（257m 机房平台上）；屋顶 257m；顶楼 230m；
+//   观光层：室内 208m / 室外 218m；上塔楼 204–218m 区域，10 层，高 46m，最大直径 36m；
+//   塔身长 153m；塔座高 49.7m，其中基台 63×63m 方形、高 15.4m，共三层；
+//   下塔楼（发射机房）为扁正锥台，悬在四根斜撑之间，高 28m、六层，最大直径 54m，
+//   17.2m 层设 2m 宽环形参观走道；塔身为四肢状、八边形外附四条腿，
+//   四条腿沿斜线向上收分——面对任意一根斜撑看去呈“川”字；
+//   上塔楼为正锥台（幕墙向下倾斜），两个“蘑菇/盖碗茶”形塔楼是全塔最认的特征。
+// 几何（相对高度，地面 y0；顶端精确 339m，measure 误差 0）：
+//   方基台 63×63×15.4（0–15.4）→ 四斜腿（2–52m，向内收）→
+//   环形走道盘 R28（16.2–17.2）→ 下塔楼扁锥台 R20→R27（17.2–45.2，Ø54m）→
+//   八边形主塔身 R13→R9（50–203，153m）→
+//   上塔楼下锥台 R12→R18（204–218）→ 室外观光平台盘 R19（217.6–218.8）→
+//   上塔楼上锥台 R18→R13（218–232）→ 收分段 R13→R10（232–250）→
+//   机房顶 R10→R8（250–257）→ 天线桅杆 R3→R0.8（257–336）→ 塔尖锥 R0.8→0.05（336–339）。
+// 颜色：只用白膜灰系——默认模式浅灰混凝土（不再是深蓝板 + 电青霓虹环 + 品红塔尖，
+//   那套配色已随旧扁盒子一起撤掉）；白膜模式换陶土色 clay，与六区白膜同口径。
+//   不上色、不贴图：两档都是纯色标准材质，形靠几何。
 // 用法（接线，见报告）：
 //   const m = await import('./tower-fix.js'); await m.init(window.__sandbox);
 // 导出：init(ctx), setDisplay(mode), measure()
 const TOWER = { x: 2492.5, z: -179.1, height: 339 };
 const C = {
-  body: 0x2a3358, deck: 0x3a4a7a, mast: 0x1b2340,
-  cyan: 0x00f0ff, magenta: 0xff2e88, clay: 0xf2f0ea,
+  concrete: 0xd9d9d4, // 浅灰混凝土（默认模式）
+  disc: 0xcfcfc9,     // 两座塔楼略深一档，剪影分层
+  mast: 0xc4c4be,     // 天线杆略深
+  clay: 0xf2f0ea,     // 白膜陶土色
 };
 
 let api = null;
@@ -37,67 +56,67 @@ export async function init(ctx) {
   } catch (e) { console.warn('[tower-fix] groundHeightAt failed, use 3.0', e); }
   if (!isFinite(groundY)) groundY = 3.0;
 
-  const bodyMat = new THREE.MeshStandardMaterial({
-    color: C.body, roughness: 0.55, metalness: 0.35, emissive: 0x141a33, emissiveIntensity: 0.6,
-  });
-  const deckMat = new THREE.MeshStandardMaterial({
-    color: C.deck, roughness: 0.5, metalness: 0.4, emissive: 0x1b2340, emissiveIntensity: 0.6,
-  });
-  const mastMat = new THREE.MeshStandardMaterial({
-    color: C.mast, roughness: 0.45, metalness: 0.5, emissive: 0x0b1026, emissiveIntensity: 0.8,
-  });
-  const ringMat = new THREE.MeshBasicMaterial({ color: C.cyan });
-  const tipMat = new THREE.MeshBasicMaterial({ color: C.magenta });
-  // 材质口径（threejs-materials-lighting）：塔身用 MeshStandardMaterial（受光），
-  // 霓虹环/发光塔尖用 MeshBasicMaterial（不吃光的纯色发光体）；高度用 Box3 量
-  // （threejs-gltf-loading Pattern 1：量包围盒报尺寸，见 measure()）
+  const concreteMat = new THREE.MeshStandardMaterial({ color: C.concrete, roughness: 0.9, metalness: 0 });
+  const discMat = new THREE.MeshStandardMaterial({ color: C.disc, roughness: 0.9, metalness: 0 });
+  const mastMat = new THREE.MeshStandardMaterial({ color: C.mast, roughness: 0.85, metalness: 0.05 });
   const clayMat = new THREE.MeshStandardMaterial({ color: C.clay, roughness: 0.95, metalness: 0 });
 
   const group = new THREE.Group();
   group.name = 'tower-339-fix';
 
-  // 各段均为相对高度（y0 = 地面），顶端精确落在 339m
   const bodyParts = []; // 白膜模式要换 clay 的部件
-  const rings = [];     // 白膜模式要藏起来的霓虹环
-  function addPart(geo, mat, y, list) {
+  function addPart(geo, mat, y) {
     const m = new THREE.Mesh(geo, mat);
     m.position.y = y;
     m.userData.mat = mat;
     group.add(m);
-    (list || bodyParts).push(m);
+    bodyParts.push(m);
     return m;
   }
-  function addRing(y, radius, tube) {
-    const m = new THREE.Mesh(new THREE.TorusGeometry(radius, tube, 8, 48), ringMat);
-    m.rotation.x = Math.PI / 2;
-    m.position.y = y;
-    group.add(m);
-    rings.push(m);
-    return m;
+  // 圆台/圆柱段：rTop, rBottom, y0, y1, segments, mat
+  function frustum(rTop, rBottom, y0, y1, seg, mat) {
+    return addPart(new THREE.CylinderGeometry(rTop, rBottom, y1 - y0, seg), mat, (y0 + y1) / 2);
   }
 
-  // 底座：0–16m，下口半径 42m —— 包住原 113m 旧塔的塔基与塔身下段
-  addPart(new THREE.CylinderGeometry(30, 42, 16, 16), bodyMat, 8);
-  // 收分主塔身：16–170m，30 → 15m（旧塔 113m 全高都在此段半径内）
-  addPart(new THREE.CylinderGeometry(15, 30, 154, 16), bodyMat, 93);
-  // 塔楼 1：170–184m，半径 21m
-  addPart(new THREE.CylinderGeometry(21, 21, 14, 16), deckMat, 177);
-  // 上塔身：184–256m，14 → 8m
-  addPart(new THREE.CylinderGeometry(8, 14, 72, 16), bodyMat, 220);
-  // 塔楼 2：256–270m，半径 15m
-  addPart(new THREE.CylinderGeometry(15, 15, 14, 16), deckMat, 263);
-  // 天线杆：270–328m，7 → 1.2m
-  addPart(new THREE.CylinderGeometry(1.2, 7, 58, 12), mastMat, 299);
-  // 发光塔尖：328–339m，品红，顶端精确 339m（杆顶 328m 与尖底 328m 对接，无悬空缝）
-  const tip = addPart(new THREE.CylinderGeometry(0.05, 1.2, 11, 12), tipMat, 333.5);
-
-  // 电青霓虹环：底座顶、两座塔楼上下沿、天线杆根
-  addRing(16, 31, 0.8);
-  addRing(170, 21.5, 0.8);
-  addRing(184, 21.5, 0.8);
-  addRing(256, 15.5, 0.7);
-  addRing(270, 15.5, 0.7);
-  addRing(328, 2.0, 0.5);
+  // 方基台：63×63m，高 15.4m（实测），0–15.4m
+  addPart(new THREE.BoxGeometry(63, 15.4, 63), concreteMat, 7.7);
+  // 四条斜腿：从基台四角 (±26, 2) 向内收到 (±10, 52)，四边形截面梁（实测“四肢状、八边形外附四条腿”）
+  {
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const [sx, sz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const p0 = new THREE.Vector3(sx * 26, 2, sz * 26);
+      const p1 = new THREE.Vector3(sx * 10, 52, sz * 10);
+      const dir = p1.clone().sub(p0);
+      const len = dir.length();
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(2.0, 3.4, len, 4), concreteMat);
+      leg.position.copy(p0).add(p1).multiplyScalar(0.5);
+      leg.quaternion.setFromUnitVectors(up, dir.clone().normalize());
+      leg.rotateY(Math.PI / 4); // 方截面外表面朝外
+      leg.userData.mat = concreteMat;
+      group.add(leg);
+      bodyParts.push(leg);
+    }
+  }
+  // 环形参观走道盘：R28，16.2–17.2m（实测 17.2m 层 2m 宽环形走道）
+  frustum(28, 28, 16.2, 17.2, 24, discMat);
+  // 下塔楼（发射机房）：扁正锥台，R20→R27，17.2–45.2m（实测高 28m，最大直径 54m）
+  frustum(27, 20, 17.2, 45.2, 24, discMat);
+  // 八边形主塔身：R13→R9，50–203m（实测塔身长 153m）
+  frustum(9, 13, 50, 203, 8, concreteMat);
+  // 上塔楼下锥台（正锥台，向上外扩）：R12→R18，204–218m（实测最大直径 36m）
+  frustum(18, 12, 204, 218, 16, discMat);
+  // 室外观光平台盘：R19，217.6–218.8m（实测 218m 室外观光层）
+  frustum(19, 19, 217.6, 218.8, 24, discMat);
+  // 上塔楼上锥台：R18→R13，218–232m（顶楼 230m 在此段）
+  frustum(13, 18, 218, 232, 16, discMat);
+  // 收分段：R13→R10，232–250m
+  frustum(10, 13, 232, 250, 16, concreteMat);
+  // 机房顶：R10→R8，250–257m（实测屋顶 257m）
+  frustum(8, 10, 250, 257, 12, concreteMat);
+  // 天线桅杆：R3→R0.8，257–336m（实测桅杆 87.5m，257m 平台上）
+  frustum(0.8, 3.0, 257, 336, 12, mastMat);
+  // 塔尖锥：R0.8→0.05，336–339m，顶端精确 339m
+  frustum(0.05, 0.8, 336, 339, 12, mastMat);
 
   group.position.set(TOWER.x, groundY, TOWER.z);
   scene.add(group);
@@ -117,8 +136,6 @@ export async function init(ctx) {
   function doSetDisplay(mode) {
     const white = mode === 'white';
     for (const m of bodyParts) m.material = white ? clayMat : m.userData.mat;
-    tip.material = white ? clayMat : tipMat;
-    for (const r of rings) r.visible = !white;
   }
 
   api = {
@@ -127,7 +144,7 @@ export async function init(ctx) {
     dispose() {
       scene.remove(group);
       group.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
-      for (const m of [bodyMat, deckMat, mastMat, ringMat, tipMat, clayMat]) m.dispose();
+      for (const m of [concreteMat, discMat, mastMat, clayMat]) m.dispose();
       api = null;
     },
   };

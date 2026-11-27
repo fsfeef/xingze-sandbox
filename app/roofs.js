@@ -7,6 +7,11 @@
 //   ③ 按位置哈希种子确定性分型（SplitMix64，同一栋每次加载同一个顶）：
 //      2026-11-26 第一步：盖子全拆，通用楼只剩平顶（什么都不加）；女儿墙尺寸、
 //      设备盒、塔楼收分、传统民居坡顶全是细打磨，等白模对比过了再做，本轮不上。
+//      2026-11-27 phase-2（白模全量令）：细打磨加回——女儿墙 0.5m/0.3m、
+//      设备盒 3×2×1.2m、塔楼两级退台冠（按高度分档）、低传统民居（≤6.4m
+//      两层）坡顶；屋顶形制一栋一栋不一样（退台/坡顶/裙楼顶/转角切）。
+//      平顶仍是底：附加体只从本栋凸包+实测 topY 派生、向内收，绝不外悬，
+//      盖子不回来。
 //      高层幕墙竖线 + 转角亮边保留（立面，不动）；大底盘另加裙楼（h>=30）。
 //   ④ 25 地标里 1 路只做屋顶造型的 16 座（归属表 lane-coordination §5），每座一个
 //      独立形制（见 LANDMARK_FORM）：古建风（檐板+四坡顶+宝顶/重檐/八角亭）/
@@ -441,13 +446,29 @@ function weightedPick(rng, table) {
   for (const [item, w] of table) { roll -= w; if (roll < 0) return item; }
   return table[table.length - 1][0];
 }
-// 屋顶语法旧表（2026-11-26 起不再参与分型：盖子拿掉，见 applyRoofGrammar 前注释）。
-//   表留着只为扫掠脚本 G2/G3 钉 weightedPick 的确定性/分布，不删。
-//   规则 = 高度带 → 形制加权表；同一栋种子固定，同一栋每次同一个顶。
+// 屋顶语法表（phase-2，2026-11-27 令加回）：高度带 → 形制加权表；
+//   同一栋种子固定，同一栋每次同一个顶。平顶仍是底——每栋楼自己的平顶面
+//   都在，退台/坡顶/转角是顶的形制变化，不是另贴盖子：所有附加体都从本栋
+//   自己的凸包 + 实测 topY 派生、向内收（不小于 20% 内收），绝不外悬。
+//   high 塔楼：两级退台冠（按高度分档）；mid：平顶+设备盒 / 一级退台 /
+//   浅坡 / 转角切（Mansard 四面斜坡收角）；low（≤6.4m 两层）：传统坡顶。
+function pointInConvexHull(pt, hull) {
+  // 凸包点内判定（符号一致法；hull 来自 convexHull，必凸）
+  if (!hull || hull.length < 3) return false;
+  let sign = 0;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i], b = hull[(i + 1) % hull.length];
+    const cr = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0]);
+    if (Math.abs(cr) < 1e-9) continue;
+    const s = cr > 0 ? 1 : -1;
+    if (sign === 0) sign = s; else if (s !== sign) return false;
+  }
+  return true;
+}
 const ROOF_GRAMMAR = {
-  high: [['mansard-crown', 0.45], ['chamfer-crown', 0.35], ['hip-crown', 0.20]],
-  mid: [['hip', 0.30], ['gable', 0.25], ['mansard', 0.20], ['setback', 0.15], ['round', 0.10]],
-  low: [['hip', 0.40], ['gable', 0.30], ['flat-plant', 0.30]],
+  high: [['tower-mansard', 0.45], ['tower-chamfer', 0.35], ['tower-hip', 0.20]],
+  mid: [['flat-plant', 0.35], ['setback', 0.30], ['hip-low', 0.20], ['corner-cut', 0.15]],
+  low: [['hip', 0.55], ['gable', 0.45]],
 };
 function bagToMesh(THREE, bag, material) {
   if (!bag.pos.length) return null;
@@ -524,7 +545,7 @@ function clusterTopFaces(geo) {
   for (const t of top) {
     const r = find(t);
     let g = groups.get(r);
-    if (!g) { g = { tris: [], x0: 1e9, x1: -1e9, z0: 1e9, z1: -1e9, topY: -1e9, area: 0, pts: new Map() }; groups.set(r, g); }
+    if (!g) { g = { tris: [], x0: 1e9, x1: -1e9, z0: 1e9, z1: -1e9, topY: -1e9, minTopY: 1e9, area: 0, pts: new Map() }; groups.set(r, g); }
     g.tris.push(t);
     for (let k = 0; k < 3; k++) {
       const vi = idx ? idx[t * 3 + k] : t * 3 + k;
@@ -532,6 +553,7 @@ function clusterTopFaces(geo) {
       if (x < g.x0) g.x0 = x; if (x > g.x1) g.x1 = x;
       if (z < g.z0) g.z0 = z; if (z > g.z1) g.z1 = z;
       if (y > g.topY) g.topY = y;
+      if (y < g.minTopY) g.minTopY = y;
       g.pts.set(Math.round(x * 10) + ',' + Math.round(z * 10), [x, z]);
     }
     // 投影面积（xz 平面）
@@ -541,10 +563,25 @@ function clusterTopFaces(geo) {
     g.area += Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2;
   }
   const out = [];
+  // baseY：每 (x,z) 量化键的最低顶点 y（墙与顶共 (x,z)，墙脚即地面）；一遍扫全量顶点。
+  //   hReal = topY - baseY 是楼的真实高（≤6.4m 传统民居分档凭它，不凭 topY-3 的粗口径）。
+  const minYByKey = new Map();
+  const nv = pos.length / 3;
+  for (let vi = 0; vi < nv; vi++) {
+    const k = Math.round(pos[vi * 3] * 10) + ',' + Math.round(pos[vi * 3 + 2] * 10);
+    const y = pos[vi * 3 + 1];
+    const old = minYByKey.get(k);
+    if (old === undefined || y < old) minYByKey.set(k, y);
+  }
   for (const g of groups.values()) {
     const w = g.x1 - g.x0, d = g.z1 - g.z0;
     if (g.area < 25 || Math.min(w, d) < 5) continue;
-    out.push({ ...g, cx: (g.x0 + g.x1) / 2, cz: (g.z0 + g.z1) / 2, w, d, h: Math.max(0, g.topY - 3) });
+    let baseY = g.topY;
+    for (const k of g.pts.keys()) { const y = minYByKey.get(k); if (y !== undefined && y < baseY) baseY = y; }
+    // spanY：顶面三角自身的 y 跨度。干净楼顶 ≈0；地面板吸走楼顶的并簇跨度几十米
+    //   （板在 5m、楼顶在 60m），这种簇的轮廓是板的轮廓不是楼的，语法不碰它。
+    const spanY = g.topY - g.minTopY;
+    out.push({ ...g, cx: (g.x0 + g.x1) / 2, cz: (g.z0 + g.z1) / 2, w, d, h: Math.max(0, g.topY - 3), baseY, hReal: Math.max(0, g.topY - baseY), spanY });
   }
   out.sort((a, b) => b.area - a.area);
   return out.slice(0, 500);
@@ -561,19 +598,85 @@ function clusterTopFaces(geo) {
 //   阶段 3 材质/灯光：高度带冷蓝紫 + 霓虹框/角部信标（img2threejs 分阶段建造：
 //   blockout → structure → form → material → lighting，一阶段一阶段过，不一口吃成）。
 // proxy 只读几何实测值，不编数；form 由语法表 + 子种子定。
-// ---- 屋顶语法（第一步：盖子全拆，只剩平顶）----
-// 2026-11-26 老大定顺序：先照参考白模对比，没问题了再打磨楼顶。
-//   第一步只做：盖子全拆干净，顶就是楼自己的平顶，不加任何东西。
-//   女儿墙尺寸、设备盒、塔楼收分、传统民居坡顶——全是细打磨，等白模对比
-//   过了再做，别现在就上。以后不许再出现后贴盖子这种糊弄，顶只能是楼自己的顶。
-//   形制只剩一种：'flat'（平顶，什么都不加；女儿墙带在 buildChunkRoofs 里，
-//   是旧代码原样保留的 0.9m 高/0.35m 厚，本轮不动它）。
-//   ROOF_GRAMMAR 加权表不再参与分型，只留给扫掠脚本 G2/G3 钉 weightedPick 用。
+// ---- 屋顶语法（phase-2，2026-11-27 令加回）----
+// 平顶仍是底：每栋楼自己的平顶面都在，语法只在顶上做本栋自己的形制变化。
+//   盖子不许回来——所有附加体都从本栋凸包 + 实测 topY 派生、向内收（≥20%），
+//   绝不外悬、绝不另贴与足迹无关的盒子；唯一的盒子是 3×2×1.2m 设备盒，
+//   坐在屋顶平面内、种子定方位。
+//   分档凭 hReal（topY - baseY，真高）：≤6.4m（两层）传统坡顶；6.4–30m 中层
+//   四种（平顶+设备盒 / 一级退台 / 浅坡 / 转角切）；≥30m 塔楼两级退台冠，
+//   冠高按高度分档（≥60m 一档、30–60m 一档）。
+//   地面板簇（hReal<2，顶就是地面）与吸走楼顶的并簇（spanY>3，轮廓是板不是楼）
+//   一律 'flat'，不加任何东西。女儿墙在 buildChunkRoofs 里（phase-2：0.5m 高/0.3m 厚）。
+function pushEquipmentBox(solid, g, hull, rngForm) {
+  // 设备盒 3×2×1.2m（phase-2 令）：只放屋顶平面内；方位种子定，8 个环向候选；
+  //   点在凸包外就退到中心偏置，再外就放中心。只此一处允许 solid 盒子（见 G6）。
+  const EQUIP = [0.20, 0.24, 0.38];
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
+  const [dx, dz] = dirs[Math.floor(rngForm() * dirs.length)];
+  const ox = dx * Math.max(0, g.w / 2 - 4.5), oz = dz * Math.max(0, g.d / 2 - 4.0);
+  let ex = g.cx + ox, ez = g.cz + oz;
+  if (!pointInConvexHull([ex, ez], hull)) { ex = g.cx + dx * 2; ez = g.cz + dz * 2; }
+  if (!pointInConvexHull([ex, ez], hull)) { ex = g.cx; ez = g.cz; }
+  pushBox(solid, ex, g.topY, ez, 3, 1.2, 2, EQUIP); // 设备盒 3×2×1.2m
+}
 function applyRoofGrammar(g, hull, solid, neon, rngForm, neonC) {
-  // 第一步：什么都不加。平顶就是分块 GLB 自己的顶面；种子仍钉死（同一栋每次同一个顶，
-  //   目前只有 'flat' 一种，确定性由扫掠 G5b 钉着）。
-  S.grammar['flat'] = (S.grammar['flat'] || 0) + 1;
-  return 'flat';
+  const hReal = (typeof g.hReal === 'number') ? g.hReal : g.h;
+  const spanY = (typeof g.spanY === 'number') ? g.spanY : 0;
+  let form = 'flat';
+  if (hReal >= 2 && spanY <= 3 && hull && hull.length >= 3) {
+    const tile = [0.16, 0.21, 0.40];   // 古建瓦顶：冷蓝紫调（配色表 R05 落法）
+    const crown = [0.23, 0.29, 0.48];  // 退台冠顶
+    const minSide = Math.min(g.w, g.d);
+    if (hReal <= 6.4) {
+      // 低传统民居（≤6.4m，两层）：坡顶，按真实轮廓走
+      form = weightedPick(rngForm, ROOF_GRAMMAR.low);
+      if (form === 'hip') {
+        const rise = Math.max(1.2, Math.min(4, minSide * 0.18));
+        if (!pushHipFromHull(solid, hull, g.topY, rise, tile)) form = 'flat';
+      } else { // gable：三角坡顶，脊沿长轴，足迹内收 8%
+        pushPrism(solid, g.cx, g.topY, g.cz, g.w * 0.92, Math.max(1.2, Math.min(3.5, minSide * 0.16)), g.d * 0.92, tile, g.w >= g.d);
+      }
+    } else if (hReal < 30) {
+      // 中层：平顶+设备盒 / 一级退台 / 浅坡 / 转角切（Mansard 四面斜坡收角）
+      form = weightedPick(rngForm, ROOF_GRAMMAR.mid);
+      if (form === 'flat-plant') {
+        pushEquipmentBox(solid, g, hull, rngForm);
+      } else if (form === 'setback') {
+        pushChamferCrown(solid, g.cx, g.topY, g.cz, g.w * 0.78, 2.2 + rngForm() * 1.3, g.d * 0.78, crown);
+        pushEquipmentBox(solid, g, hull, rngForm);
+      } else if (form === 'hip-low') {
+        const rise = 1.2 + rngForm() * 1.0;
+        if (!pushHipFromHull(solid, hull, g.topY, rise, tile)) form = 'flat';
+      } else { // corner-cut
+        pushMansard(solid, g.cx, g.topY, g.cz, g.w * 0.80, 2.0 + rngForm() * 1.5, g.d * 0.80, crown);
+      }
+    } else {
+      // 塔楼：两级退台冠，冠高按高度分档（≥60m 一档、30–60m 一档）
+      form = weightedPick(rngForm, ROOF_GRAMMAR.high);
+      const tall = hReal >= 60;
+      const ch1 = tall ? 4.5 + rngForm() * 1.5 : 3.0 + rngForm() * 1.5;
+      const ch2 = tall ? 3.0 + rngForm() * 1.5 : 2.0 + rngForm() * 1.0;
+      pushChamferCrown(solid, g.cx, g.topY, g.cz, g.w * 0.72, ch1, g.d * 0.72, crown);
+      if (form === 'tower-mansard') {
+        pushMansard(solid, g.cx, g.topY + ch1, g.cz, g.w * 0.50, ch2, g.d * 0.50, crown);
+      } else if (form === 'tower-chamfer') {
+        pushChamferCrown(solid, g.cx, g.topY + ch1, g.cz, g.w * 0.48, ch2, g.d * 0.48, crown);
+      } else { // tower-hip：二级按轮廓收 55% 的四坡顶
+        let gx = 0, gz = 0;
+        for (const p of hull) { gx += p[0]; gz += p[1]; }
+        gx /= hull.length; gz /= hull.length;
+        const small = hull.map((p) => [gx + (p[0] - gx) * 0.45, gz + (p[1] - gz) * 0.45]);
+        if (!pushHipFromHull(solid, small, g.topY + ch1, ch2, tile)) {
+          pushChamferCrown(solid, g.cx, g.topY + ch1, g.cz, g.w * 0.48, ch2, g.d * 0.48, crown);
+          form = 'tower-chamfer';
+        }
+      }
+      if (g.w >= 18 && g.d >= 18) pushEquipmentBox(solid, g, hull, rngForm);
+    }
+  }
+  S.grammar[form] = (S.grammar[form] || 0) + 1;
+  return form;
 }
 
 
@@ -623,7 +726,7 @@ function buildChunkRoofs(mesh, key) {
         pushBox(neon, p[0], 3, p[1], 0.35, g.h, 0.35, NEON[1]);
       }
     }
-    // ② 女儿墙 + 霓虹顶线（凸包边沿）
+    // ② 女儿墙 + 霓虹顶线（凸包边沿；phase-2：0.5m 高/0.3m 厚）
     const hull = convexHull([...g.pts.values()]);
     if (hull.length >= 3) {
       const wallC = [0.10, 0.13, 0.25];
@@ -633,8 +736,8 @@ function buildChunkRoofs(mesh, key) {
         if (len < 2) continue;
         const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2;
         const ry = Math.atan2(-(b[1] - a[1]), b[0] - a[0]);
-        pushBox(solid, mx, g.topY, mz, len, 0.9, 0.35, wallC, ry);
-        pushBox(neon, mx, g.topY + 0.9, mz, len, 0.12, 0.28, neonC, ry); // 霓虹顶线收细（截图验：0.42 太粗，满城描边）
+        pushBox(solid, mx, g.topY, mz, len, 0.5, 0.3, wallC, ry);
+        pushBox(neon, mx, g.topY + 0.5, mz, len, 0.12, 0.28, neonC, ry); // 霓虹顶线收细（截图验：0.42 太粗，满城描边）
         edges++;
       }
     }
@@ -989,10 +1092,15 @@ function applyMode() {
   if (ln) ln.visible = !white && !heat && nightOn;
   const lm = landmarkGroup.getObjectByName('landmark-metal');
   if (lm) lm.visible = !white; // 金属盖板跟实体走：白膜换陶土色，热力留
-  // 白膜去黑框：分块 GLB 里 baked 的楼边线，perf.js 全城合并成
-  //   chunk-merged-line-global（matLine 深色），白膜下没有任何隐藏逻辑。
-  //   线的所有权在 perf.js/six-loader.js，本处只在白膜下控显隐；
-  //   彻底的修法是 perf.js tickTiles 里按模式决定建不建线合并体，改天挪过去。
+  // 白膜去黑框（两层，2026-11-27 B 路核查）：
+  //   ① 本处藏合并体：分块 GLB 里 baked 的楼边线，perf.js 全城合并成
+  //      chunk-merged-line-global，白膜下藏掉——实测稳态下生效（藏住后
+  //      visible=false、0 条可见线）。但它只管稳态：perf 签名一变就重建，
+  //      新体 visible 默认 true，要等本 tick（900ms）来藏；流式加载/飞
+  //      过去时黑线一直在闪，单靠藏不住。
+  //   ② six-loader.js setDisplay 把共用的 matLine 原地换成浅灰
+  //      （vertexColors 关、color #dcdde0）：源线与合并体同实例，瞬态里
+  //      露出来的线也是浅灰不是黑框。两层缺一不可，别只留一层。
   const lineMerged = (ctx && ctx.scene && typeof ctx.scene.getObjectByName === 'function')
     ? ctx.scene.getObjectByName('chunk-merged-line-global') : null;
   if (lineMerged) lineMerged.visible = !white;
@@ -1040,7 +1148,7 @@ export function setNight(n) {
 export function stats() { return statsSnapshot(); }
 
 // 测试导出（procedural-gen Pattern 2：把自有 PRNG 钉在测试里，重构改了输出就露馅）
-export const __roofTest = { splitmix, hash2, roofColorFor, outwardNormal, emitTri, pushBox, newBag, pushMansard, pushChamferCrown, pushHipFromHull, pushFinial, pushNeonFrame, weightedPick, ROOF_GRAMMAR, applyRoofGrammar, pushPyramid, pushOctPyramid, pushCylinder, pushPavilion, buildGardenPavilions, PAVILION_PARKS, getGroups: () => ({ roofGroup, neonGroup, landmarkGroup, matClay, matSolid, matNeon, matMetal }) };
+export const __roofTest = { splitmix, hash2, roofColorFor, outwardNormal, emitTri, pushBox, newBag, pushMansard, pushChamferCrown, pushHipFromHull, pushFinial, pushNeonFrame, weightedPick, ROOF_GRAMMAR, applyRoofGrammar, pushPyramid, pushOctPyramid, pushCylinder, pushPavilion, buildGardenPavilions, PAVILION_PARKS, pushPrism, pushEquipmentBox, pointInConvexHull, clusterTopFaces, getGroups: () => ({ roofGroup, neonGroup, landmarkGroup, matClay, matSolid, matNeon, matMetal }) };
 
 // ---- 技能—文件对照表（林萧 16:23/16:25 死令：装上的技能用起来；用不上的说清为什么）----
 // 用上的：
